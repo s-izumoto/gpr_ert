@@ -138,46 +138,89 @@ def _load_field_source_idx(npz_path: str):
 
 
 def load_ert_npz(ert_npz_path):
+    """
+    Robust loader:
+      - meta は dict / str(JSON) / bytes(JSON) / ndarray(object) の全パターンを許容
+      - R は rows_per_field → (n_AB*n_MN_per_AB) → (n_fields から) → sidecar(field_source_idx.npy) →
+        環境変数 ERT_ROWS_PER_FIELD の順に決定（最後の砦が env）
+    """
+    import os, json
     d = np.load(ert_npz_path, allow_pickle=True)
+
+    # 必須データ
     Dnorm = np.asarray(d["Dnorm"], dtype=np.float32)  # [N_rows, 4]
     y     = np.asarray(d["y"],     dtype=np.float32)  # [N_rows]
+    N_rows = int(Dnorm.shape[0])
+
+    # ---- meta の安全取得（dict/str/bytes/ndarray すべて対応）----
     meta = {}
     if "meta" in d.files:
+        raw = d["meta"]
+        if isinstance(raw, np.ndarray) and raw.size:
+            raw = raw[0]
         try:
-            meta = json.loads(d["meta"][0])
+            if isinstance(raw, dict):
+                meta = raw
+            elif isinstance(raw, (bytes, np.bytes_)):
+                meta = json.loads(raw.decode("utf-8", "ignore"))
+            elif isinstance(raw, str):
+                meta = json.loads(raw)
         except Exception:
             meta = {}
 
-    # --- R: 1フィールドあたりの行数を決める ---
+    # ---- R を決める（フォールバック順）----
     R = None
-    # (A) 通常版: n_AB * n_MN_per_AB
-    if ("n_AB" in meta) and ("n_MN_per_AB" in meta):
+
+    # 0) 環境変数があれば最優先（明示指定で即アンブロック）
+    env_r = os.getenv("ERT_ROWS_PER_FIELD")
+    if env_r:
+        try:
+            R = int(env_r)
+        except Exception:
+            R = None
+        if R and R > 0:
+            return Dnorm, y, meta, R
+
+    # 1) meta["rows_per_field"]
+    if R is None and "rows_per_field" in meta:
+        try:
+            R = int(meta["rows_per_field"])
+        except Exception:
+            R = None
+
+    # 2) 通常（AB×MN）
+    if R is None and ("n_AB" in meta) and ("n_MN_per_AB" in meta):
         try:
             R = int(meta["n_AB"]) * int(meta["n_MN_per_AB"])
         except Exception:
             R = None
-    # (B) Wenner 版: n_fields と総行数から推定
-    if (R is None) and ("n_fields" in meta):
+
+    # 3) n_fields と総行数から
+    if R is None and ("n_fields" in meta):
         try:
-            n_fields = int(meta["n_fields"])
-            N_rows   = int(Dnorm.shape[0])
-            if n_fields > 0 and N_rows % n_fields == 0:
-                R = N_rows // n_fields
+            nf = int(meta["n_fields"])
+            if nf > 0 and N_rows % nf == 0:
+                R = N_rows // nf
         except Exception:
             R = None
-    # (C) それでも決まらない場合、ABMN の行数と n_fields から推定
-    if (R is None) and (("ABMN" in d.files) or ("ABMN_all" in d.files)) and ("n_fields" in meta):
-        key = "ABMN" if "ABMN" in d.files else "ABMN_all"
-        ABMN = np.asarray(d[key])
-        N_rows = int(ABMN.shape[0])
-        n_fields = int(meta.get("n_fields", 0))
-        if n_fields > 0 and N_rows % n_fields == 0:
-            R = N_rows // n_fields
 
+    # 4) sidecar: 同階層の field_source_idx.npy から n_fields 推定
+    if R is None:
+        from pathlib import Path
+        side = Path(ert_npz_path).with_name("field_source_idx.npy")
+        if side.is_file():
+            try:
+                nf = int(np.load(side, allow_pickle=True).reshape(-1).size)
+                if nf > 0 and N_rows % nf == 0:
+                    R = N_rows // nf
+            except Exception:
+                pass
+
+    # 5) それでも無理なら、ここでエラー（デバッグ情報付き）
     if R is None:
         raise RuntimeError(
-            "Could not infer per-field row count R. meta keys: "
-            + ", ".join(sorted(meta.keys()))
+            "Could not infer per-field row count R. "
+            f"N_rows={N_rows}, meta keys={sorted(list(meta.keys()))}"
         )
 
     return Dnorm, y, meta, int(R)
