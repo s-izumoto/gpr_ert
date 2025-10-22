@@ -1,0 +1,11 @@
+# ===== Core scientific stack =====
+numpy
+scipy
+pandas
+matplotlib
+tqdm
+PyYAML
+ipykernel
+
+# ===== PyTorch (CPU wheels) =====
+torch

@@ -1,0 +1,2 @@
+[Epoch 01] train=1.1373 (nll=0.6805, kl=2.2422) | val=1.0211 | mean(p)=0.352 | mean(evidence)=397.0 | time/epoch=94.46s
+[TOTAL] time_all_epochs=94.47s (avg/epoch=94.47s)

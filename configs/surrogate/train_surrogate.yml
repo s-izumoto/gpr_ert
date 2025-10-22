@@ -1,0 +1,43 @@
+# configs/surrogate/train_surrogate.yml
+# Surrogate (FiLM) training config. Values mirror your working PowerShell command.
+ds: .\data\interim\surrogate_ds\ert_surrogate.npz
+out: .\models
+
+# Data & split
+val: 0.1
+test: 0.1
+seed: 0
+use_dnorm: true          # --use-dnorm
+reciprocity_aug: true    # --reciprocity-aug
+
+# Loader
+workers: 1
+batch: 16384
+
+# Optim & schedule
+epochs: 30
+patience: 10
+lr: 0.004            # 2e-3
+weight_decay: 0.0001 # 1e-4
+
+# Model (FiLM trunk)
+hidden: [768, 768, 512]
+dropout: 0.05
+amp: true
+
+# Loss
+loss: huber
+huber_delta: 0.03
+
+# Residual head (optional post-calibration)
+residual_head: true
+res_hidden: [128, 64]
+res_dropout: 0.0
+res_epochs: 120
+res_lr: 0.002
+res_weight_decay: 1.0e-5
+res_huber_delta: 0.05
+res_use_mu_as_feat: true
+
+# Resume (optional)
+resume: .\models\ckpt.pt

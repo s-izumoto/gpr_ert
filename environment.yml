@@ -1,0 +1,16 @@
+name: go-boed-ert
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.11
+  # Core scientific stack
+  - numpy
+  - scipy
+  - pandas
+  - matplotlib
+  - tqdm
+  - pyyaml
+  - ipykernel
+  # PyTorch
+  - pytorch

@@ -1,0 +1,12 @@
+ds: ./data/interim/fields
+out: ./data/processed/pca
+crop_frac: 0.70
+max_components: 256
+target_var: 0.99
+solver: randomized
+incremental: false
+batch: 256
+per_class: false
+save_projections: true
+save_recon: true
+dpi: 140

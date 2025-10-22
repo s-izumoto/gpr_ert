@@ -1,0 +1,53 @@
+# configs/oracle/make_oracle.yml
+# Human-friendly config for oracle mask generation.
+#
+# Run:
+#   python 04_make_oracle_masks.py --config configs/oracle/make_oracle.yml
+#
+# Or specify a different builder:
+#   python 04_make_oracle_masks.py --config configs/oracle/make_oracle.yml --script build/build_oracle.py
+
+# -------- Inputs --------
+inputs:
+  # Choose ONE of the two below:
+  dataset:    "./data/interim/surrogate_ds/ert_surrogate.npz"  # unified dataset (keeps dataset field order)
+  # Z:           "./data/interim/pca/Z.npz"       # unified latent file with 'Z' only
+  pca:         "./data/interim/pca/pca_joint.joblib"       # PCA bundle (joblib)
+
+# Output root
+out: "data/processed/oracle_pairs"
+
+# (Optional) Only needed if using inputs.dataset and dataset meta lacks n_AB/n_MN_per_AB
+selection:
+  rows_per_field: null   # e.g., 480 (n_AB * n_MN_per_AB). null means "infer from dataset meta".
+
+# -------- Geometry --------
+geom:
+  nz_full:   100
+  nx_full:   400
+  world_Lx:  31.0     # meters (domain width along x)
+
+# -------- Mask parameters --------
+mask:
+  #sigma_m: [0.5, 1.0, 2.0]  # Gaussian scales in meters
+  sigma_m: [0.5]  # Gaussian scales in meters
+  thresh_pct: 80            # percentile at fine scale (within thresh_region)
+  head: [25, 100]           # coarse head grid (Hc, Wc)
+  scale_normalize: true     # scale-normalized derivative
+  downsample: "quantile"    # one of: any | frac | quantile
+  min_frac: 0.02            # ensure this fraction of ROI is active (inside ROI)
+  coarse_q: 0.80            # coarse quantile if downsample=quantile
+  thresh_region: "shallow"  # 'shallow' (use nz_crop rows) or 'all'
+  min_component_frac: 0.01  # Minimum connected-component area as a fraction of ROI pixels (0..1).
+
+# -------- ROI options --------
+roi:
+  apply_roi: true
+  roi_top_width_frac: 1.0
+  roi_bottom_width_frac: 0.50
+  roi_gamma: 1.2
+  thresh_in_roi: true
+
+# -------- Misc --------
+misc:
+  preview_n: 10
