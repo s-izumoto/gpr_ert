@@ -15,7 +15,7 @@ inputs:
   pca:         "./data/interim/pca/pca_joint.joblib"       # PCA bundle (joblib)
 
 # Output root
-out: "data/processed/oracle_pairs"
+out: "data/processed/oracle_pairs_soft"
 
 # (Optional) Only needed if using inputs.dataset and dataset meta lacks n_AB/n_MN_per_AB
 selection:
@@ -51,3 +51,6 @@ roi:
 # -------- Misc --------
 misc:
   preview_n: 10
+
+selection:
+  rows_per_field: 512

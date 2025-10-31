@@ -1,8 +1,8 @@
 # reduce_oracle.yml — settings for reducing near-duplicates and enforcing diversity
 #
 # Paths (adjust to your repo):
-npz: ./data/processed/oracle_pairs/latent_oracle_pairs_aligned.npz
-out_prefix: ./data/processed/oracle_pairs_reduced/oracle_pairs_reduced
+npz: ./data/processed/oracle_pairs_soft/value_bot20_oracle_aligned.npz
+out_prefix: ./data/processed/oracle_pairs_reduced/value_bot20_oracle_soft_reduced
 #
 # Embedding & randomness
 rp_dim: 64

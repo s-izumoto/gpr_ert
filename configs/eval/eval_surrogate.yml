@@ -1,8 +1,8 @@
 ds: data/interim/surrogate_ds/ert_surrogate.npz
-model: models/best_model.pt           # or TorchScript: models/best_model_with_residual.ts.pt
-scalers: models/scaler_meta.npz
+model: models/ert_surrogate/best_model.pt           # or TorchScript: models/best_model_with_residual.ts.pt
+scalers: models/ert_surrogate/scaler_meta.npz
 
-field: 2000
+field: 0
 hidden: [768, 768, 512]
 dropout: 0.05
 
