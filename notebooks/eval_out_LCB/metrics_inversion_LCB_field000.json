@@ -1,0 +1,15 @@
+{
+  "label": "inversion_LCB_field000",
+  "inv_npz": "inversion_LCB_field000.npz",
+  "Nc": 6415,
+  "lambda_depth": 0.0,
+  "mae_log10": 0.34487602496233943,
+  "rmse_log10": 0.4240885137415271,
+  "bias_log10": -0.08741176806614026,
+  "pearson_log10": 0.8395800929729806,
+  "spearman_log10": 0.908374301527123,
+  "mae_linear": 279.7213264195365,
+  "rmse_linear": 521.3378964076401,
+  "mae_relative_percent": 72.37168530351764,
+  "rmse_relative_percent": 89.51231657186284
+}

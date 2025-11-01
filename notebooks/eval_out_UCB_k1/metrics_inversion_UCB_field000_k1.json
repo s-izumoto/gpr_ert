@@ -1,0 +1,15 @@
+{
+  "label": "inversion_UCB_field000_k1",
+  "inv_npz": "inversion_UCB_field000_k1.npz",
+  "Nc": 6415,
+  "lambda_depth": 0.0,
+  "mae_log10": 0.4409937407613939,
+  "rmse_log10": 0.5657708121348743,
+  "bias_log10": -0.2082790649287058,
+  "pearson_log10": 0.7285422412880491,
+  "spearman_log10": 0.8627981771529952,
+  "mae_linear": 314.974966915446,
+  "rmse_linear": 581.776410140743,
+  "mae_relative_percent": 75.40774142643257,
+  "rmse_relative_percent": 94.07677177394733
+}

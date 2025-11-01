@@ -1,0 +1,32 @@
+[
+  {
+    "label": "inversion_LCB_field000_k1",
+    "inv_npz": "inversion_LCB_field000_k1.npz",
+    "Nc": 6415,
+    "lambda_depth": 0.0,
+    "mae_log10": 0.359188954247808,
+    "rmse_log10": 0.44693913511314703,
+    "bias_log10": -0.10474874508869761,
+    "pearson_log10": 0.8178701284080198,
+    "spearman_log10": 0.884433377806772,
+    "mae_linear": 285.7236829870551,
+    "rmse_linear": 533.3149350741083,
+    "mae_relative_percent": 72.90852156099183,
+    "rmse_relative_percent": 89.68369939701955
+  },
+  {
+    "label": "inversion",
+    "inv_npz": "..\\outputs_wenner\\inversion.npz",
+    "Nc": 6415,
+    "lambda_depth": 0.0,
+    "mae_log10": 0.3961430963941203,
+    "rmse_log10": 0.5175871525951885,
+    "bias_log10": -0.17167351511351028,
+    "pearson_log10": 0.7622568813930919,
+    "spearman_log10": 0.8275631309755911,
+    "mae_linear": 303.2751110402492,
+    "rmse_linear": 569.7942123062863,
+    "mae_relative_percent": 69.2165344023449,
+    "rmse_relative_percent": 83.45039918827905
+  }
+]

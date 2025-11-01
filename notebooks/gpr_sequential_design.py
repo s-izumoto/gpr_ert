@@ -10,7 +10,13 @@ GPRを教師に使い、連続空間で獲得関数を最大化 → 離散デザ
 - Warmup: ert_physics_forward_wenner.py の rows.npz（例）から ABMN と y を使用
 - Surrogate: train_ert_surrogate.py の学習出力 (model .pt と scaler_meta.npz) を使用
 """
+import os
+# GUIを使わないバックエンドに固定
+os.environ.setdefault("MPLBACKEND", "Agg")
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")  # 念のため
 
+import matplotlib
+matplotlib.use("Agg", force=True)
 from dataclasses import dataclass
 from typing import Callable, List, Tuple, Optional, Dict
 from pathlib import Path
@@ -584,7 +590,8 @@ def _abmn_unit_to_dmm(x_unit: np.ndarray) -> np.ndarray:
     mMN = 0.5 * (M + N)
     return np.array([dAB, dMN, mAB, mMN], dtype=np.float64)
 
-def _acquisition_values(cfg: Config, mu: np.ndarray, sigma: np.ndarray, y_best: float) -> np.ndarray:
+def _acquisition_values(cfg: Config, mu: np.ndarray, sigma: np.ndarray, y_best: float,
+                        observed_noise_var: float | None = None) -> np.ndarray:
     from scipy.stats import norm
     A = cfg.acquisition.upper()
     if A == "LCB":
@@ -600,8 +607,9 @@ def _acquisition_values(cfg: Config, mu: np.ndarray, sigma: np.ndarray, y_best: 
         return sigma**2
     elif A == "MI":
         # 相互情報量: 0.5*log(1 + sigma^2 / noise^2)
-        # noise_level は GP の WhiteKernel と合わせる（log10スケールの実測ノイズ想定）
-        sn2 = max(cfg.noise_level, 1e-12)
+        # 優先: 学習済み WhiteKernel の noise_level → フォールバック: cfg.noise_level
+        sn2 = float(observed_noise_var) if (observed_noise_var is not None) else cfg.noise_level
+        sn2 = max(sn2, 1e-12)
         return 0.5 * np.log1p((sigma**2) / sn2)
     else:
         raise ValueError(f"Unknown acquisition: {cfg.acquisition}")
@@ -995,6 +1003,9 @@ def run_sequential_design(cfg: Config, ne: int, total_steps: int) -> Dict[str, n
         )
         gp.fit(X_feat, y)
 
+        dist_ls, pos_ls, noise_var = _extract_ls_noise_from_kernel(gp.kernel_)
+        obs_sn2 = float(noise_var) if (noise_var is not None) else None
+
         kernel_prior = gp.kernel_
 
         # === NEW: active 各回直後のGPRパラメータ出力（観測を追加する前のモデル状態） ===
@@ -1047,7 +1058,7 @@ def run_sequential_design(cfg: Config, ne: int, total_steps: int) -> Dict[str, n
         if args.sigma_calib == "scale":
             sigma = apply_sigma_calibration(sigma, s_calib)
 
-        vals = _acquisition_values(cfg, mu, sigma, y_best)
+        vals = _acquisition_values(cfg, mu, sigma, y_best, observed_noise_var=obs_sn2)
         best_local = np.argmin(vals) if cfg.acquisition.upper() == "LCB" else np.argmax(vals)
 
         # === NEW: 候補統計（M と acq/μ/σ の統計＋選択値） ===
@@ -1252,6 +1263,7 @@ if __name__ == "__main__":
 
     # 従来どおりの逐次デザイン実行
     cfg = Config(acquisition="MI", kappa=2.0, warmup_steps=35, seed=args.seed)
+    # cfg = Config(acquisition="UCB", kappa=1.0, warmup_steps=35, seed=args.seed)
     log = run_sequential_design(cfg, ne=32, total_steps=155)
     np.savez_compressed(LOG_SEQLOG_PATH, **log)
     print("[done] saved:", LOG_SEQLOG_PATH)

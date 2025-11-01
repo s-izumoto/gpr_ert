@@ -9,13 +9,17 @@ invert_from_npz_with_ertgeom_autobase.py
 - Runs pyGIMLi ERT inversion and saves PNG
 
 Usage:
-  python invert_from_npz_with_ertgeom_autobase.py \
+  python invert_from_npz_with_ertgeom.py \
     --npz ./gpr_seq_logs/<run>/seq_log_field000.npz \
-    --out ./inversion_field000.png \
+    --out ./inversion_MI_field000.png \
     --n-elec 32 --dx-elec 1.0 --margin 3.0 --nx-full 400 --nz-full 100 --mesh-area 0.1
 """
 from __future__ import annotations
-
+import os
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+os.environ.setdefault("MPLBACKEND", "Agg")
+import matplotlib
+matplotlib.use("Agg", force=True)
 import argparse
 from pathlib import Path
 from typing import Iterable, Any
@@ -78,7 +82,7 @@ def invert_and_save_image(mesh, scheme, rhoa: np.ndarray,
     inv_res = mgr.invert(data, mesh=mesh, lam=20, robust=True, verbose=False)
     inv_arr = np.asarray(inv_res, dtype=float)
 
-    # 線形スケール（従来どおり）
+    # --- 線形スケール ---
     cmin = float(np.nanmin(inv_arr))
     cmax = float(np.nanmax(inv_arr))
     fig, ax = plt.subplots(figsize=(6, 3))
@@ -88,10 +92,9 @@ def invert_and_save_image(mesh, scheme, rhoa: np.ndarray,
     fig.savefig(out_png_linear, dpi=200)
     plt.close(fig)
 
-    # ログカラースケール（色だけ log、凡例は Ωm）
+    # --- ログスケール ---
     out_log_path = None
     if out_png_log:
-        # cMin は正に制限
         cmin_log = max(cmin, 1e-12)
         fig, ax = plt.subplots(figsize=(6, 3))
         _ = mgr.showResult(ax=ax, cMin=cmin_log, cMax=cmax, cMap="Spectral_r", logScale=True)
@@ -101,7 +104,44 @@ def invert_and_save_image(mesh, scheme, rhoa: np.ndarray,
         plt.close(fig)
         out_log_path = out_png_log
 
+    # --- ★ ここからNPZ保存追加 ★ ---
+    try:
+        npz_path = str(Path(out_png_linear).with_suffix(".npz"))
+        # セル中心座標
+        cx = np.array([c.center()[0] for c in mesh.cells()], dtype=np.float32)
+        cz = np.array([c.center()[1] for c in mesh.cells()], dtype=np.float32)
+        # ワールド範囲
+        xs = np.array([v[0] for v in mesh.nodes()], dtype=np.float32)
+        zs = np.array([v[1] for v in mesh.nodes()], dtype=np.float32)
+        xmin, xmax = float(xs.min()), float(xs.max())
+        zmin, zmax = float(zs.min()), float(zs.max())
+        L_world = xmax - xmin
+        Lz = abs(zmax - zmin)
+        # ABMN と rhoa
+        abmn = np.stack([scheme["a"], scheme["b"], scheme["m"], scheme["n"]], axis=1).astype(np.int32)
+        rhoa_f = np.asarray(rhoa, dtype=np.float64)
+        # 保存
+        np.savez_compressed(
+            npz_path,
+            inv_rho_cells=np.asarray(inv_arr, dtype=np.float64),
+            cell_centers=np.stack([cx, cz], axis=1),
+            cmin=float(cmin),
+            cmax=float(cmax),
+            abmn=abmn,
+            rhoa=rhoa_f,
+            world_xmin=float(xmin),
+            world_xmax=float(xmax),
+            world_zmin=float(zmin),
+            world_zmax=float(zmax),
+            L_world=float(L_world),
+            Lz=float(Lz),
+        )
+        print(f"[save] inversion NPZ -> {npz_path}")
+    except Exception as e:
+        print(f"[WARN] failed to save inversion NPZ: {e}")
+
     return out_png_linear, out_log_path
+
 
 
 def to_zero_based(designs: np.ndarray, n_elec: int):
