@@ -46,21 +46,6 @@ KEYMAP = {
     "schl-a-max": "schl_a_max",
 }
 
-# --- add: worker for parallel run (top-level for picklable) ---
-def _run_one_field_worker(cfg_dict: dict, fid: int, base_bundle_dir: str) -> tuple[int, str]:
-    """One field run in a separate process. Returns (field_id, out_dir_str)."""
-    from dataclasses import asdict
-
-    # per-field subdir
-    sub_dir = Path(base_bundle_dir) / f"field{int(fid):03d}"
-    sub_dir.mkdir(parents=True, exist_ok=True)
-
-    # override out_dir for this field
-    cfg_i = GPRSeqConfig(**{**cfg_dict, "out_dir": str(sub_dir)})
-    out_dir = run_from_cfg(cfg_i, field_index=int(fid))
-    return int(fid), str(out_dir)
-
-
 def _normalize_config_keys(d: dict) -> dict:
     out = {}
     for k, v in (d or {}).items():
@@ -123,13 +108,17 @@ def main():
         "--field-index", type=int, nargs="+", default=[0,2],
         help="対象フィールドの行インデックス。例: --field-index 0 3 7"
     )
-    p.add_argument("--run-tag", type=str, default=None)
-    p.add_argument("--fields-from-medoids", type=str, default=None)
+    p.add_argument(
+        "--run-tag", type=str, default=None,
+        help="出力フォルダ名に付ける任意タグ（未指定なら日時）"
+    )
 
-    # ★ 追加: 並列ワーカー数（既定はCPU数かフィールド数の小さい方）
-    default_workers = max(1, min(os.cpu_count() or 1, 4))  # 好みで上限 4 など
-    p.add_argument("--workers", type=int, default=None,
-                   help=f"並列ワーカー数（未指定なら適切に自動設定）")
+    p.add_argument(
+        "--fields-from-medoids", type=str, default=None,
+        help="cluster_pca_kmeans.py の出力 medoids_index.npz へのパス。中の src_index を fields として使う。"
+    )
+
+    # 既存の引数があればここに維持（例: その他のフラグ）
 
     ns = p.parse_args()
 
@@ -171,6 +160,8 @@ def main():
     fields = sorted(set(int(x) for x in fields))
     print(f"[run] fields to process: {fields}")
 
+
+
     # すでに上で fields は決定済み（YAML/CLI/medoids から）
     # ここで GPRSeqConfig に渡す dict を作るとき、未知キーは入れない
     cfg_payload = dict(yaml_cfg_norm)
@@ -183,9 +174,8 @@ def main():
         cfg = GPRSeqConfig(**cfg_payload)
     except TypeError as e:
         warnings.warn(f"[warn] Unknown keys in YAML may be ignored by GPRSeqConfig: {e}")
-        # 念のため、GPRSeqConfig 定義に存在しないキーを落として再トライ
-        allow = set(GPRSeqConfig.__annotations__.keys())
-        cfg = GPRSeqConfig(**{k: v for k, v in cfg_payload.items() if k in allow})
+        # さらに未知キーを削る必要があればここで対応（通常は不要）
+        cfg = GPRSeqConfig(**cfg_payload)
 
 
     # === bundle ディレクトリを作成 ===
@@ -197,48 +187,31 @@ def main():
     bundle_cand_csv = bundle_dir / "bundle_candidate_stats.csv"
     bundle_gprp_csv = bundle_dir / "bundle_gpr_params.csv"
 
-    # ★ 子プロセスに渡すため GPRSeqConfig を dict 化
-    cfg_base_dict = asdict(cfg)
-
-    # ★ 並列実行（workers==1 のときは従来どおり逐次）
-    workers = ns.workers if ns.workers is not None else min(len(fields), default_workers)
-    print(f"[parallel] workers = {workers}")
-
-    results = []  # list[(fid, out_dir_str)]
-    if workers == 1:
-        for fid in fields:
-            fid_i, out_dir_str = _run_one_field_worker(cfg_base_dict, int(fid), str(bundle_dir))
-            print(f"[done] field={fid_i} -> {out_dir_str}")
-            results.append((fid_i, out_dir_str))
-    else:
-        from concurrent.futures import ProcessPoolExecutor, as_completed
-        with ProcessPoolExecutor(max_workers=int(workers)) as ex:
-            futs = {
-                ex.submit(_run_one_field_worker, cfg_base_dict, int(fid), str(bundle_dir)): int(fid)
-                for fid in fields
-            }
-            for fut in as_completed(futs):
-                fid_i, out_dir_str = fut.result()
-                print(f"[done] field={fid_i} -> {out_dir_str}")
-                results.append((fid_i, out_dir_str))
-
-    # ---- 以降の集約は「field 昇順」で決定的に実施 ----
-    results.sort(key=lambda x: x[0])
-
     # NPZ を集約するためのバッファ（フィールド毎に保持）
     # キー命名: "<key>__field%03d"
     bundle_npz_dict = {}
     fields_done = []
 
-    for fid, out_dir_str in results:
-        out_dir = Path(out_dir_str)
+    for fid in fields:
+        # 各フィールドはサブフォルダに隔離して実行
+        sub_dir = bundle_dir / f"field{int(fid):03d}"
+        sub_dir.mkdir(parents=True, exist_ok=True)
+
+        # out_dir を差し替えた cfg を作る
+        cfg_i = GPRSeqConfig(**{**asdict(cfg), "out_dir": str(sub_dir)})
+
+        # 実行
+        out_dir = run_from_cfg(cfg_i, field_index=int(fid))
+        print(f"[done] field={fid} -> {out_dir}")
 
         # ---- CSV を bundle に追記 ----
-        _append_csv(out_dir / "candidate_stats.csv", bundle_cand_csv)
-        _append_csv(out_dir / "gpr_params.csv",    bundle_gprp_csv)
+        cand_csv = Path(out_dir) / "candidate_stats.csv"
+        gprp_csv = Path(out_dir) / "gpr_params.csv"
+        _append_csv(cand_csv, bundle_cand_csv)
+        _append_csv(gprp_csv, bundle_gprp_csv)
 
         # ---- NPZ を集約 ----
-        seq_npz = out_dir / "seq_log.npz"
+        seq_npz = Path(out_dir) / "seq_log.npz"
         if seq_npz.exists():
             d = _npz_to_dict(seq_npz)
             tag = f"field{int(fid):03d}"
@@ -248,7 +221,8 @@ def main():
         else:
             print(f"[warn] seq_log.npz not found for field={fid}")
 
-    # === bundle npz を保存（シングルスレッド時と同じキー体系・順序） ===
+    # === bundle npz を保存 ===
+    # メタ情報として fields を入れておく
     bundle_npz_dict["fields"] = np.asarray(fields_done, dtype=np.int32)
     np.savez(bundle_dir / "seq_logs_bundle.npz", **bundle_npz_dict)
     print(f"[bundle] saved: {bundle_dir/'seq_logs_bundle.npz'}")
@@ -257,7 +231,6 @@ def main():
     print("  dir :", bundle_dir)
     print("  csv :", bundle_cand_csv.name, ",", bundle_gprp_csv.name)
     print("  npz :", "seq_logs_bundle.npz")
-
 
     _end_t = perf_counter()
     _end_wall_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
