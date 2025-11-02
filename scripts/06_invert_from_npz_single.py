@@ -21,7 +21,6 @@ print(f"[time] start: {_start_wall_ts}")
 def main():
     ap = argparse.ArgumentParser(description="Thin runner: read YAML and call build.invert_ops.run_inversion()")
     ap.add_argument("--config", required=True, help="Path to YAML config.")
-    ap.add_argument("--workers", type=int, default=1, help="並列プロセス数（1=単スレ）")
     args = ap.parse_args()
 
     cfg_path = Path(args.config)
@@ -51,7 +50,6 @@ def main():
     nx_full = int(cfg.get("nx_full", 400))
     nz_full = int(cfg.get("nz_full", 100))
     mesh_area = float(cfg.get("mesh_area", 0.1))
-    workers = int(cfg.get("workers", args.workers))
 
     bundle = run_inversion(
         npz_path=npz,
@@ -69,7 +67,6 @@ def main():
         nx_full=nx_full,
         nz_full=nz_full,
         mesh_area=mesh_area,
-        workers=workers,
     )
 
     print(f"[runner] bundle saved at: {bundle}")

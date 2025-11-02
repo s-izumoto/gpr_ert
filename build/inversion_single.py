@@ -12,56 +12,6 @@ import numpy as np
 import matplotlib
 matplotlib.use("Agg", force=True)
 import matplotlib.pyplot as plt
-# === 追加 import ===
-from concurrent.futures import ProcessPoolExecutor, as_completed
-
-def _invert_job(payload):
-    """子プロセス側：単一フィールドを逆解析して結果を返す（画像は作らない）"""
-    # 内部BLASの並列を殺して再現性＆安定性能
-    os.environ["OMP_NUM_THREADS"] = "1"
-    os.environ["OPENBLAS_NUM_THREADS"] = "1"
-    os.environ["MKL_NUM_THREADS"] = "1"
-    os.environ["NUMEXPR_NUM_THREADS"] = "1"
-
-    # ---- 受け取り ----
-    label          = payload["label"]
-    designs        = payload["designs"]
-    y              = payload["y"]
-    n_elec         = payload["n_elec"]
-    L_world        = payload["L_world"]
-    margin         = payload["margin"]
-    mesh_area      = payload["mesh_area"]
-
-    # 幾何（各プロセスで同一手順・同一乱数不使用 ⇒ 決定論的）
-    sensors, xs, dx_eff, L_inner = make_sensor_positions(n_elec, L_world, margin)
-    mesh = build_mesh_world(L_world, payload["Lz"], sensors,
-                            dz_under=0.05,
-                            area=(mesh_area if mesh_area and mesh_area > 0 else None), quality=34)
-
-    # ABMNを0始まりに
-    a, b, m, n, base = to_zero_based(designs, n_elec)
-
-    # ρa（log10(y) → linear Ωm）
-    rhoa = np.power(10.0, y).astype(float)
-    rhoa = np.maximum(rhoa, 1e-12)
-
-    # 測線作成と幾何係数
-    scheme = make_scheme(sensors, a, b, m, n)
-    scheme.createGeometricFactors()
-
-    # 逆解析
-    inv_arr, cmin, cmax, _mgr = invert_core(mesh, scheme, rhoa)
-
-    # 必要な成果だけ返す（画像生成のための mgr は親で再計算せず、画像は親の最初フィールドのみで作る方針）
-    res = {
-        "label": label,
-        "inv_arr": np.asarray(inv_arr, dtype=np.float64),
-        "cmin": float(cmin),
-        "cmax": float(cmax),
-        "abmn": np.stack([scheme['a'], scheme['b'], scheme['n'], scheme['m']], axis=1).astype(np.int32)[:, [0,1,3,2]],
-        "rhoa": np.asarray(rhoa, dtype=np.float64),
-    }
-    return res
 
 
 # --------- pygimli helpers (lazy import) ----------
@@ -234,7 +184,6 @@ def run_inversion(
     nx_full: int = 400,
     nz_full: int = 100,
     mesh_area: float = 0.1,
-    workers: int = 1,
 ) -> Path:
     """Main inversion pipeline. Returns path to saved bundle npz."""
     npz_path = Path(npz_path)
@@ -270,11 +219,23 @@ def run_inversion(
     hy = L_world / float(nx_full)
     Lz = hy * float(nz_full)
 
+    # output dirs / bundle path
+    if out_dir:
+        out_dir = Path(out_dir)
+    elif out:
+        out_dir = Path(out).parent
+    else:
+        out_dir = npz_path.parent
+    Path(out_dir).mkdir(parents=True, exist_ok=True)
+
+    bundle_path = Path(bundle_out) if bundle_out else (Path(out_dir) / "inversion_bundle.npz")
+
+    # mesh (shared)
     sensors, xs, dx_eff, L_inner = make_sensor_positions(n_elec, L_world, margin)
     mesh = build_mesh_world(L_world, Lz, sensors, dz_under=0.05,
                             area=(mesh_area if mesh_area and mesh_area > 0 else None), quality=34)
 
-    # メッシュ・メタは単スレと同じ手順で作成（＝NPZ完全一致）
+    # mesh meta
     xs_nodes = np.array([v[0] for v in mesh.nodes()], dtype=np.float32)
     zs_nodes = np.array([v[1] for v in mesh.nodes()], dtype=np.float32)
     xmin, xmax = float(xs_nodes.min()), float(xs_nodes.max())
@@ -295,104 +256,49 @@ def run_inversion(
         "Lz":         np.array([Lz_eff], dtype=np.float64),
     }
 
-    # 画像用のベースパス（既存ロジック維持）
+    # image base (first field by default)
     base_linear = Path(out).with_suffix("") if out else (Path(out_dir) / "inversion_first")
     base_log = Path(out_log).with_suffix("") if out_log else None
 
-    # === 並列実行の準備 ===
-    # 最初のフィールドは親プロセスで実行（画像生成の仕様を単スレと完全一致させるため）
-    first_label, first_designs, first_y, _ = targets[0]
-    a0, b0, m0, n0, base0 = to_zero_based(first_designs, n_elec)
-    rhoa0 = np.maximum(np.power(10.0, first_y).astype(float), 1e-12)
-    scheme0 = make_scheme(sensors, a0, b0, m0, n0)
-    scheme0.createGeometricFactors()
-    inv_arr0, cmin0, cmax0, mgr0 = invert_core(mesh, scheme0, rhoa0)
+    # run all targets
+    for idx, (label, designs, y, _) in enumerate(targets):
+        print(f"[run] processing {label}: T={designs.shape[0]}")
+        a, b, m, n, base = to_zero_based(designs, n_elec)
+        print(f"[base-detect] {label}: {'0-based' if base == 0 else '1-based'} -> using 0-based")
+        for i in range(min(5, len(a))):
+            print(f"  {i:02d}: a={a[i]}, b={b[i]}, m={m[i]}, n={n[i]}")
 
-    # 画像（単スレ版と同じ：デフォは最初のフィールドのみ）
-    if images_all:
-        # images_all を要求された場合でもNPZの同一性には影響なし
-        out_png_linear = Path(str(base_linear) + f"_{first_label}.png")
-        out_png_log = Path(str(base_log) + f"_{first_label}.png") if base_log else (Path(out_dir) / f"inversion_log_{first_label}.png")
-    else:
-        out_png_linear = Path(str(base_linear) + ".png")
-        out_png_log = Path(str(base_log) + ".png") if base_log else (Path(out_dir) / "inversion_first_log.png")
-    save_images(mgr0, inv_arr0, str(out_png_linear), str(out_png_log))
+        rhoa = np.power(10.0, y).astype(float)
+        rhoa = np.maximum(rhoa, 1e-12)
 
-    # 最初のフィールドを bundle に格納（単スレと同順）
-    suffix0 = f"__{first_label}"
-    bundle[f"inv_rho_cells{suffix0}"] = np.asarray(inv_arr0, dtype=np.float64)
-    bundle[f"cmin{suffix0}"]          = np.array([float(cmin0)], dtype=np.float64)
-    bundle[f"cmax{suffix0}"]          = np.array([float(cmax0)], dtype=np.float64)
-    bundle[f"abmn{suffix0}"]          = np.stack([scheme0['a'], scheme0['b'], scheme0['n'], scheme0['m']], axis=1).astype(np.int32)[:, [0,1,3,2]]
-    bundle[f"rhoa{suffix0}"]          = np.asarray(rhoa0, dtype=np.float64)
+        scheme = make_scheme(sensors, a, b, m, n)
+        scheme.createGeometricFactors()
 
-    # 残りのフィールドを並列（workers==1 なら逐次）
-    rest = targets[1:]
-    results = []
-    
-    n_total = len(targets) 
-    n_tasks = len(rest)
-    if n_tasks > 0:
-        # ★ workers 自動決定（未指定/0/-1/負なら自動）
-        if workers in (None, 0, -1) or (isinstance(workers, int) and workers < 1):
-            cpu_env = (
-                os.environ.get("SLURM_CPUS_PER_TASK")
-                or os.environ.get("OMP_NUM_THREADS")
-                or os.cpu_count()
-                or 1
-            )
-            try:
-                n_cpu = int(cpu_env)
-            except Exception:
-                n_cpu = 1
-            workers = max(1, min(n_cpu, n_tasks))   # 残りタスクとCPU数の小さい方
+        inv_arr, cmin, cmax, mgr = invert_core(mesh, scheme, rhoa)
 
-            # 任意で上限キャップしたい場合は有効化
-            # workers = min(workers, 8)
-        print(f"[info] Total fields: {n_total} (first handled in main)")
-        print(f"[info] Remaining fields: {n_tasks}")
-        print(f"[info] Using {workers} parallel worker(s) for inversion")
+        # images (default: only first field)
+        if images_all or idx == 0:
+            out_png_linear = Path(str(base_linear) + (f"_{label}" if images_all else "") + ".png")
+            if base_log:
+                out_png_log = Path(str(base_log) + (f"_{label}" if images_all else "") + ".png")
+            else:
+                out_png_log = Path(out_dir) / (("inversion_log_" + label + ".png") if images_all else "inversion_first_log.png")
+            save_images(mgr, inv_arr, str(out_png_linear), str(out_png_log))
+            print(f"[saved images] {out_png_linear} , {out_png_log}")
 
-        if workers == 1:
-            # 逐次（＝単スレ完全一致）
-            for (label, designs, y, _) in rest:
-                payload = dict(
-                    label=label, designs=designs, y=y,
-                    n_elec=n_elec, L_world=L_world, margin=margin,
-                    mesh_area=mesh_area, Lz=Lz,
-                )
-                results.append(_invert_job(payload))
-        else:
-            with ProcessPoolExecutor(max_workers=workers) as ex:
-                futs = []
-                for (label, designs, y, _) in rest:
-                    payload = dict(
-                        label=label, designs=designs, y=y,
-                        n_elec=n_elec, L_world=L_world, margin=margin,
-                        mesh_area=mesh_area, Lz=Lz,
-                    )
-                    futs.append(ex.submit(_invert_job, payload))
-                for f in as_completed(futs):
-                    results.append(f.result())
+        # bundle
+        suffix = f"__{label}"
+        bundle[f"inv_rho_cells{suffix}"] = np.asarray(inv_arr, dtype=np.float64)
+        bundle[f"cmin{suffix}"] = np.array([cmin], dtype=np.float64)
+        bundle[f"cmax{suffix}"] = np.array([cmax], dtype=np.float64)
+        bundle[f"abmn{suffix}"] = np.stack([scheme['a'], scheme['b'], scheme['n'], scheme['m']], axis=1).astype(np.int32)[:, [0, 1, 3, 2]]
+        bundle[f"rhoa{suffix}"] = np.asarray(rhoa, dtype=np.float64)
 
-
-        # フィールドラベル順に整列してから bundle へ（＝単スレと同順）
-        results_sorted = sorted(results, key=lambda d: d["label"])
-        # 注意：targets も label 昇順なので、挿入順は単スレと一致
-        for d in results_sorted:
-            suffix = f"__{d['label']}"
-            bundle[f"inv_rho_cells{suffix}"] = d["inv_arr"]
-            bundle[f"cmin{suffix}"]          = np.array([d["cmin"]], dtype=np.float64)
-            bundle[f"cmax{suffix}"]          = np.array([d["cmax"]], dtype=np.float64)
-            bundle[f"abmn{suffix}"]          = d["abmn"]
-            bundle[f"rhoa{suffix}"]          = d["rhoa"]
-
-    bundle_path = Path(bundle_out) if bundle_out else (Path(out_dir) / "inversion_bundle.npz")
-    # 既存どおりセーブ
     np.savez_compressed(bundle_path, **bundle)
     print(f"[bundle saved] {bundle_path}")
     print("[all done]")
     return bundle_path
+
 
 # -------------- CLI --------------
 def _build_argparser():
