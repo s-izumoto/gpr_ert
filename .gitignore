@@ -10,7 +10,7 @@ __pycache__/
 *.egg-info/
 .eggs/
 dist/
-build/
+# build/
 .venv/
 venv/
 
