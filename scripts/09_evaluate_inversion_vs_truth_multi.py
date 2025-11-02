@@ -20,6 +20,11 @@ if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 # リポジトリ内 import を想定（例: REPO_ROOT/build/invert_ops.py）
 from build.evaluate_inversion_vs_truth_multi import run_from_cfg
+from time import perf_counter
+from datetime import datetime
+_start_wall_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+_start_t = perf_counter()
+print(f"[time] start: {_start_wall_ts}")
 
 def main():
     ap = argparse.ArgumentParser()
@@ -41,6 +46,10 @@ def main():
     result = run_from_cfg(cfg)
     print("[done] Wrote:", result["out_dir"])
     print("[done] Metrics:", json.dumps(result["metrics"][:2], indent=2) if result["metrics"] else "[]")
-
+    _end_t = perf_counter()
+    _end_wall_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    _elapsed = _end_t - _start_t
+    print(f"[time] end:   {_end_wall_ts}  elapsed: {_elapsed:.3f}s")
+    
 if __name__ == "__main__":
     main()

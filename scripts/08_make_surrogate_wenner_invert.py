@@ -11,6 +11,12 @@ import argparse, sys, subprocess
 from pathlib import Path
 import yaml
 
+from time import perf_counter
+from datetime import datetime
+_start_wall_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+_start_t = perf_counter()
+print(f"[time] start: {_start_wall_ts}")
+
 # ---- Map YAML keys -> CLI flags of your forward script ----
 # Adjust this mapping to match the argparse of your target script.
 # Below matches the flags you shared (make_ert_surrogate_dataset_unique_parallel*.py).
@@ -133,8 +139,12 @@ def main():
     cli_args = [sys.executable, args.script] + cfg_to_cli(cfg)
     print("[runner] Exec:", " ".join(cli_args))
     proc = subprocess.run(cli_args)
+    _end_t = perf_counter()
+    _end_wall_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    _elapsed = _end_t - _start_t
+    print(f"[time] end:   {_end_wall_ts}  elapsed: {_elapsed:.3f}s")
+    
     raise SystemExit(proc.returncode)
-
 
 if __name__ == "__main__":
     main()

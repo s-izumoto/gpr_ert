@@ -23,6 +23,11 @@ if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
     
 from build.gpr_seq_core import GPRSeqConfig, run_from_cfg  # 既存の import に合わせて
+from time import perf_counter
+from datetime import datetime
+_start_wall_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+_start_t = perf_counter()
+print(f"[time] start: {_start_wall_ts}")
 
 # === KEYMAP: 表記ゆれ（エイリアス）を正規キーへ統一 ===
 KEYMAP = {
@@ -226,6 +231,12 @@ def main():
     print("  dir :", bundle_dir)
     print("  csv :", bundle_cand_csv.name, ",", bundle_gprp_csv.name)
     print("  npz :", "seq_logs_bundle.npz")
+
+    _end_t = perf_counter()
+    _end_wall_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    _elapsed = _end_t - _start_t
+    print(f"[time] end:   {_end_wall_ts}  elapsed: {_elapsed:.3f}s")
+
 
 if __name__ == "__main__":
     main()
