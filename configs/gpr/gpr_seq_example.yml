@@ -38,4 +38,4 @@ y_dataset: data/interim/ert_all_subset/ert_surrogate_all.npz
 y_dataset_col: "y" 
 fields: [0, 2]
 
-fields_from_medoids: data/processed/pca_clusters_k50/medoids_index.npz
+#fields_from_medoids: data/processed/pca_clusters_k50/medoids_index.npz

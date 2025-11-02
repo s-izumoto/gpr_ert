@@ -18,13 +18,28 @@ from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
 
 # local deps (user repo)
 # ERTDesignSpace is used when available; otherwise we fall back to a simple builder.
+import os, sys
+# いまのファイル（scripts/...）から一つ上 = リポジトリ直下
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+# まずは絶対 import（build.design）を試す。失敗したら相対。
 try:
-    from .design import ERTDesignSpace  # prefer build/design.py
-except Exception:
+    from build.design import ERTDesignSpace  # 標準経路
+except Exception as e1:
     try:
-        from build.design import ERTDesignSpace  # fallback if executed differently
-    except Exception:
-        ERTDesignSpace = None
+        # パッケージ実行（python -m build.gpr_seq_core）時の相対
+        from .design import ERTDesignSpace  # type: ignore[import-not-found]
+    except Exception as e2:
+        raise ImportError(
+            "Failed to import ERTDesignSpace. Check that:\n"
+            "  * build/design.py が存在しファイル名の大文字小文字が正しいこと\n"
+            "  * build/ に __init__.py があること（パッケージ化）\n"
+            "  * 実行前に CWD がリポ直下であること（cd $REPO_ROOT）\n"
+            "  * スクリプトは `python -m scripts.05_gpr_sequential_design` のように -m 実行でも可\n"
+            f"Details:\n  e1={e1}\n  e2={e2}\n  REPO_ROOT={REPO_ROOT}\n  sys.path[0]={sys.path[0]}"
+        )
 
 # --------------------------
 # Configuration (YAML-driven)
