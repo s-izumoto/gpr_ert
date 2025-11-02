@@ -180,27 +180,53 @@ def to_zero_based(designs: np.ndarray, n_elec: int) -> Tuple[np.ndarray, np.ndar
 
 
 def find_field_indices(npz: np.lib.npyio.NpzFile) -> List[int]:
-    pat = re.compile(r"^y__field(\d{3})$")
-    fields = []
+    """
+    y__field*, ABMN__field* の両方を走査し、フィールド番号を桁数に依らず抽出。
+    例: y__field7, y__field007, ABMN__field12, ABMN__field0012 など。
+    """
+    pat = re.compile(r"^(?:y|ABMN)__field(\d+)$")  # ← \d+ で桁数フリー & y/ABMN 両対応
+    fields: List[int] = []
     for k in npz.files:
         m = pat.match(k)
         if m:
-            fields.append(int(m.group(1)))
+            s = m.group(1)                  # '7', '007', '0012' など
+            v = int(s.lstrip("0") or "0")   # 先頭0を許容し整数化（'000'→0）
+            fields.append(v)
+
+    # 重複除去
+    fields = sorted(set(fields))
+
+    # フォールバック: 'fields' 配列キーがあればそれを使う
     if not fields and "fields" in npz.files:
         arr = np.asarray(npz["fields"]).reshape(-1).astype(int).tolist()
         fields = arr
-    return sorted(fields)
+
+    return fields
+
+def _pick_field_key(npz: np.lib.npyio.NpzFile, base: str, field_idx: int) -> str:
+    """
+    base='y__field' or 'ABMN__field'
+    候補: 03桁, 非ゼロ埋め, 先頭0ありの任意桁を正規表現で検索、の順で探す。
+    """
+    candidates = [f"{base}{field_idx:03d}", f"{base}{field_idx}"]
+    for k in candidates:
+        if k in npz.files:
+            return k
+    # 最後に 0*<idx> を許容する正規表現で探索
+    pat = re.compile(rf"^{re.escape(base)}0*{field_idx}$")
+    for k in npz.files:
+        if pat.match(k):
+            return k
+    raise SystemExit(f"Missing key for base={base!r} field_idx={field_idx}. Tried {candidates} and regex {pat.pattern}.")
 
 
 def load_field_npz(npz: np.lib.npyio.NpzFile, field_idx: int) -> Tuple[np.ndarray, np.ndarray]:
-    k_abmn = f"ABMN__field{field_idx:03d}"
-    k_y = f"y__field{field_idx:03d}"
-    if k_abmn not in npz.files:
-        raise SystemExit(f"Missing key '{k_abmn}' for field {field_idx}")
-    if k_y not in npz.files:
-        raise SystemExit(f"Missing key '{k_y}' for field {field_idx}")
+    # ここをゼロ埋め固定から柔軟検索に変更
+    k_abmn = _pick_field_key(npz, "ABMN__field", field_idx)
+    k_y    = _pick_field_key(npz, "y__field",    field_idx)
+
     ABMN = np.asarray(npz[k_abmn]).astype(int)
-    y = np.asarray(npz[k_y]).astype(float)
+    y    = np.asarray(npz[k_y]).astype(float)
     if ABMN.shape[0] != y.shape[0]:
         raise SystemExit(f"Mismatched lengths for field {field_idx}: ABMN={ABMN.shape[0]} vs y={y.shape[0]}")
     return ABMN, y
@@ -329,7 +355,7 @@ def run_inversion(
     # 残りのフィールドを並列（workers==1 なら逐次）
     rest = targets[1:]
     results = []
-    
+
     n_total = len(targets) 
     n_tasks = len(rest)
     if n_tasks > 0:

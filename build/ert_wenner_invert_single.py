@@ -26,7 +26,6 @@ import pygimli as pg
 import pygimli.meshtools as mt
 from pygimli.physics import ert
 import matplotlib.pyplot as plt
-import concurrent.futures
 
 # Limit BLAS/OpenMP threads per worker (avoid oversubscription)
 for var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
@@ -72,8 +71,6 @@ class ERTForwardConfig:
     invert_out: str | None = None   # 先頭PNGの保存先（既定名は自動）
     inv_npz_out: str | None = None  # バンドルNPZ保存先
     inv_save_all_png: bool = False  # PNGは既定で先頭のみ
-    workers: int | None = None  # Noneなら自動
-
 
 # ==== Small utils ====
 class TempDir:
@@ -381,29 +378,7 @@ def simulate_one_field(z_row: np.ndarray, comps: np.ndarray, mean: np.ndarray, n
     Dnorm[:, 3] = (D[:, 3] - cfg.margin) / L_inner  # mMN normalized
 
     ABMN = np.stack([a, b, m, n], axis=1).astype(np.int32)
-    return (
-        D.astype(np.float32),
-        Dnorm.astype(np.float32),
-        ABMN.astype(np.int32),
-        y.astype(np.float32),
-        rhoa.astype(np.float32),
-        kfac.astype(np.float32),
-        xs.astype(np.float32),
-        float(dx_eff),
-    )
-
-def _simulate_one_field_payload(args):
-    (z_row, comps, mean, nz_crop, nx_crop, cfg, L_world, Lz, seed, field_id) = args
-    D, Dn, ABMN, y, rhoa, kfac, xs, dx_eff = simulate_one_field(
-        z_row, comps, mean, nz_crop, nx_crop, cfg, L_world, Lz, seed
-    )
-    return {
-        "field_id": int(field_id),
-        "Z_row": z_row.astype(np.float32),
-        "D": D, "Dn": Dn, "ABMN": ABMN,
-        "y": y, "rhoa": rhoa, "k": kfac,
-        "xs": xs, "dx_eff": float(dx_eff),
-    }
+    return D, Dnorm, ABMN, y, rhoa, kfac, xs.astype(np.float32), dx_eff, scheme, mesh
 
 
 def _parse_fields(s: str) -> list[int]:
@@ -470,7 +445,6 @@ def _read_fields_from_seqnpz(path: str | os.PathLike) -> list[int]:
 
 # ==== Runner ====
 def run(cfg: ERTForwardConfig) -> Path:
-
     out_dir = Path(cfg.out); out_dir.mkdir(parents=True, exist_ok=True)
 
     # Load PCA and latent
@@ -517,16 +491,6 @@ def run(cfg: ERTForwardConfig) -> Path:
         n_fields = len(fields)
         print(f"[ERT] simulate: {n_fields} fields, k={k_lat} (idx {start}..{stop-1})")
 
-    # fields: 反転対象のフィールド一覧（既存ロジック）
-    if cfg.workers in (None, 0):
-        cpu = os.cpu_count() or 1
-        auto = max(1, min(len(fields), max(1, cpu // 2)))  # CPUの半分×フィールド数で安全側
-        workers = auto
-    else:
-        workers = max(1, int(cfg.workers))
-    print(f"[parallel] workers = {workers}")
-
-
     # Geometry: compute world_Lx if dx_elec given
     if cfg.dx_elec and cfg.dx_elec > 0:
         L_world = 2.0 * cfg.margin + (cfg.n_elec - 1) * cfg.dx_elec
@@ -536,8 +500,8 @@ def run(cfg: ERTForwardConfig) -> Path:
     Lz = hy * float(cfg.nz_full)
 
     # Seeds
-    base_rng = np.random.default_rng(getattr(cfg, "seed", 0))
-    seeds = base_rng.integers(0, 2**31 - 1, size=max(1, len(fields)), dtype=np.int64)
+    base_rng = np.random.default_rng(cfg.seed)
+    seeds = base_rng.integers(0, 2**31 - 1, size=max(1, n_fields), dtype=np.int64)
 
     # Accumulators
     Z_all, D_all, Dn_all, ABMN_all = [], [], [], []
@@ -546,40 +510,22 @@ def run(cfg: ERTForwardConfig) -> Path:
     xs_ref = None; dx_eff_ref = None
     field_ids = []  # 実フィールド番号を保持（0..n_total-1）
 
-    # === 並列タスク引数 ===
-    task_args = []
-    for i_local, field_id in enumerate(fields):
+    for i_local in range(n_fields):
+        field_id = fields[i_local]        # ← 実際のフィールド番号
         z_row = Zslice[i_local]
-        seed_i = int(seeds[i_local % len(seeds)])
-        task_args.append((z_row, comps, mean, nz_crop, nx_crop, cfg, L_world, Lz, seed_i, field_id))
 
-    # === 実行（順序保持） ===
-    results = []
-    if workers == 1:
-        for ta in task_args:
-            results.append(_simulate_one_field_payload(ta))
-    else:
-        with concurrent.futures.ProcessPoolExecutor(max_workers=workers) as ex:
-            for r in ex.map(_simulate_one_field_payload, task_args):
-                results.append(r)
+        D, Dn, ABMN, y, rhoa, kfac, xs, dx_eff, scheme, mesh = simulate_one_field(
+            z_row, comps, mean, nz_crop, nx_crop, cfg, L_world, Lz, int(seeds[i_local % len(seeds)])
+        )
 
-    # === 収集 ===
-    Z_all, D_all, Dn_all, ABMN_all = [], [], [], []
-    y_all, rhoa_all, k_all = [], [], []
-    xs_ref = None; dx_eff_ref = None
-    field_ids = []
-
-    for r in results:
-        field_id = r["field_id"]
-        D, Dn, ABMN = r["D"], r["Dn"], r["ABMN"]
-        y, rhoa, kfac = r["y"], r["rhoa"], r["k"]
-        z_row = r["Z_row"]
+        # Repeat Z per measurement row
         Zrep = np.repeat(z_row[None, :], D.shape[0], axis=0).astype(np.float32)
-
         Z_all.append(Zrep); D_all.append(D); Dn_all.append(Dn)
         ABMN_all.append(ABMN); y_all.append(y); rhoa_all.append(rhoa); k_all.append(kfac)
+        schemes.append((scheme, mesh))
         if xs_ref is None:
-            xs_ref = r["xs"]; dx_eff_ref = r["dx_eff"]
+            xs_ref = xs; dx_eff_ref = dx_eff
+        # 実フィールド番号を書き込む
         field_ids.append(np.full(D.shape[0], field_id, dtype=np.int32))
 
     if not Z_all:
@@ -625,90 +571,67 @@ def run(cfg: ERTForwardConfig) -> Path:
 
     # Optional inversion image on "最初に選ばれた実フィールド" で評価
     # === Inversion: 選ばれた全フィールドで実行（デフォルト）
-    if cfg.invert and len(fields) > 0:
+    if cfg.invert and len(schemes) > 0:
         try:
             inv_log_list, inv_rho_list, inv_field_ids = [], [], []
             png_paths = []
             inv_save_all_png = bool(getattr(cfg, "inv_save_all_png", False))
             inv_npz_out = getattr(cfg, "inv_npz_out", None)
 
-            for i_local, fid in enumerate(fields):
-                mask_i = (field_ids == fid)
+            for i_local, (scheme_i, mesh_i) in enumerate(schemes):
+                field_id = fields[i_local]
+                mask_i = (field_ids == field_id)
                 rhoa_i = rhoa_all[mask_i]
-                abmn_i = ABMN_all[0][0:0]  # dummy; we will compute next line properly
-                # ※ ABMN_all はフィールド毎に縦連結済みなので mask で抽出
-                abmn_i = ABMN_all[0]  # ダミーに見えるが、
-                # ↑ 実際には下のようにまとめた配列にしてから使うのが確実：
-            # まとめ直し（上の“結合”直後に置くと楽）
-            ABMN_all = np.vstack(ABMN_all).astype(np.int32)
 
-            for i_local, fid in enumerate(fields):
-                mask_i = (field_ids == fid)
-                rhoa_i = rhoa_all[mask_i]
-                abmn_i = ABMN_all[mask_i]  # ← これでOK：shape (M_i, 4)
-
-                # 親側で再構築
-                sensors, xs_re, _, _ = make_sensor_positions(cfg.n_elec, L_world, cfg.margin)
-                scheme_i = make_scheme(sensors,
-                                    abmn_i[:,0].astype(np.int32),
-                                    abmn_i[:,1].astype(np.int32),
-                                    abmn_i[:,2].astype(np.int32),
-                                    abmn_i[:,3].astype(np.int32))
-                scheme_i.createGeometricFactors()
-
-                mesh_i = build_mesh_world(
-                    L_world, Lz, sensors, dz_under=0.05,
-                    area=(cfg.mesh_area if cfg.mesh_area > 0 else None), quality=34
-                )
-
-                # 反転
+                # --- 反演 ---
                 mgr = ert.ERTManager()
                 data = scheme_i.copy()
                 data["rhoa"] = rhoa_i
+
+                # --- エラー割当（相対 + フロア） ---
                 rel = float(getattr(cfg, "inv_rel_err", getattr(cfg, "noise_rel", 0.03)))
                 data["err"] = np.full_like(rhoa_i, rel, dtype=np.float32)
+                #print(f"[invert] field={field_id} err(min/max/mean)={err.min():.3g}/{err.max():.3g}/{err.mean():.3g}")
 
                 inv_rho = mgr.invert(data, mesh=mesh_i, lam=20, robust=True, verbose=False)
                 inv_rho = np.asarray(inv_rho, dtype=np.float32)
                 inv_log = np.log10(inv_rho, dtype=np.float32)
 
-                inv_field_ids.append(np.int32(fid))
+                inv_field_ids.append(np.int32(field_id))
                 inv_rho_list.append(inv_rho)
                 inv_log_list.append(inv_log)
 
-                # PNG 保存（先頭のみ or 全部）
-
-                # 既存の出力パス決定
-                if (i_local == 0) and getattr(cfg, "invert_out", None):
-                    out_lin = Path(cfg.invert_out)
-                else:
-                    out_lin = (out_dir / f"inversion_field{fid:03d}.png")
-
-                out_log = out_lin.with_name(out_lin.stem + "_log" + out_lin.suffix)
-
-                # ★ 追加：親ディレクトリを必ず作る
-                out_lin.parent.mkdir(parents=True, exist_ok=True)
-
-
+                # --- PNG 保存（既定は先頭のみ。全保存したい場合は cfg.inv_save_all_png=True を渡す） ---
                 save_png_this = inv_save_all_png or (i_local == 0)
                 if save_png_this:
-                    out_lin = (Path(cfg.invert_out) if (i_local == 0 and getattr(cfg, "invert_out", None))
-                            else (out_dir / f"inversion_field{fid:03d}.png"))
+                    # 先頭のみ明示パスがあればそれを使う。以降は fieldID を埋めた自動名
+                    if (i_local == 0) and getattr(cfg, "invert_out", None):
+                        out_lin = Path(cfg.invert_out)
+                    else:
+                        out_lin = (out_dir / f"inversion_field{field_id:03d}.png")
                     out_log = out_lin.with_name(out_lin.stem + "_log" + out_lin.suffix)
 
+                    # 線形/対数の2枚を保存
+                    # 線形スケール画像
                     fig, ax = plt.subplots(figsize=(6, 3))
                     _ = mgr.showResult(ax=ax, model=inv_rho, logScale=False)
-                    ax.set_title(f"Inverted resistivity (linear) field{fid:03d}")
-                    fig.tight_layout(); fig.savefig(out_lin, dpi=200); plt.close(fig)
+                    ax.set_title(f"Inverted resistivity (linear) field{field_id:03d}")
+                    fig.tight_layout()
+                    fig.savefig(out_lin, dpi=200)
+                    plt.close(fig)
 
+                    # 対数スケール画像（log10を自分で取って渡す）
                     fig, ax = plt.subplots(figsize=(6, 3))
                     _ = mgr.showResult(ax=ax, model=np.log10(inv_rho), logScale=False)
-                    ax.set_title(f"Inverted resistivity (log10 values) field{fid:03d}")
-                    fig.tight_layout(); fig.savefig(out_log, dpi=200); plt.close(fig)
+                    ax.set_title(f"Inverted resistivity (log10 values) field{field_id:03d}")
+                    fig.tight_layout()
+                    fig.savefig(out_log, dpi=200)
+                    plt.close(fig)
+
 
                     png_paths.extend([str(out_lin), str(out_log)])
 
-            # バンドル保存（メッシュは代表1つを保存）
+            # --- 反演結果を一つの NPZ に束ねて保存 ---
             if len(inv_rho_list) > 0:
                 bundle_path = Path(inv_npz_out) if inv_npz_out else (out_dir / "inversions_bundle.npz")
                 save_dict = {}
@@ -716,29 +639,35 @@ def run(cfg: ERTForwardConfig) -> Path:
                     save_dict[f"inv_log_cells__field{int(fid):03d}"] = logv
                     save_dict[f"inv_rho_cells__field{int(fid):03d}"] = rhov
 
-                # 代表メッシュ
-                sensors0, _, _, _ = make_sensor_positions(cfg.n_elec, L_world, cfg.margin)
-                mesh0 = build_mesh_world(L_world, Lz, sensors0, dz_under=0.05,
-                                        area=(cfg.mesh_area if cfg.mesh_area > 0 else None), quality=34)
+                # ===== ここから【追加】: メッシュ・座標・ABMN/rhoa を格納 =====
+                # メッシュは全フィールドで同一の想定なので 0 番だけ採用
+                mesh0 = schemes[0][1]  # schemes は (scheme_i, mesh_i) のリスト
                 cx = np.array([c.center()[0] for c in mesh0.cells()], dtype=np.float32)
                 cz = np.array([c.center()[1] for c in mesh0.cells()], dtype=np.float32)
                 xs = np.array([v[0] for v in mesh0.nodes()], dtype=np.float32)
                 zs = np.array([v[1] for v in mesh0.nodes()], dtype=np.float32)
                 xmin, xmax = float(xs.min()), float(xs.max())
                 zmin, zmax = float(zs.min()), float(zs.max())
+                L_world = xmax - xmin
+                Lz = abs(zmax - zmin)
 
                 save_dict["cell_centers"] = np.stack([cx, cz], axis=1)
-                save_dict["world_xmin"] = xmin; save_dict["world_xmax"] = xmax
-                save_dict["world_zmin"] = zmin; save_dict["world_zmax"] = zmax
-                save_dict["L_world"] = float(xmax - xmin); save_dict["Lz"] = float(abs(zmax - zmin))
+                save_dict["world_xmin"] = xmin
+                save_dict["world_xmax"] = xmax
+                save_dict["world_zmin"] = zmin
+                save_dict["world_zmax"] = zmax
+                save_dict["L_world"] = float(L_world)
+                save_dict["Lz"] = float(Lz)
 
-                # ABMN / rhoa もフィールド別に格納
-                for fid in fields:
+                # 各フィールドの ABMN と rhoa も保存（後処理が楽）
+                for i_local, (scheme_i, _mesh_i) in enumerate(schemes):
+                    fid = int(inv_field_ids[i_local])
+                    abmn_i = np.stack([scheme_i["a"], scheme_i["b"], scheme_i["m"], scheme_i["n"]], axis=1).astype(np.int32)
                     mask_i = (field_ids == fid)
-                    abmn_i = ABMN_all[mask_i]
                     rhoa_i = rhoa_all[mask_i]
-                    save_dict[f"abmn__field{fid:03d}"] = abmn_i.astype(np.int32)
+                    save_dict[f"abmn__field{fid:03d}"] = abmn_i
                     save_dict[f"rhoa__field{fid:03d}"] = np.asarray(rhoa_i, dtype=np.float64)
+                # ===== 追加ここまで =====
 
                 save_dict["inv_field_ids"] = np.array(inv_field_ids, dtype=np.int32)
                 if png_paths:
@@ -746,9 +675,9 @@ def run(cfg: ERTForwardConfig) -> Path:
                 np.savez_compressed(bundle_path, **save_dict)
                 print(f"[invert] saved bundle: {bundle_path}")
 
+
         except Exception as e:
             print("[WARN] Inversion failed:", e)
-
 
     return out_npz
 
@@ -807,15 +736,12 @@ if __name__ == "__main__":
         type=str, default=None,
         help="Path to seq_log.npz exported by gpr_seq_core.py; uses its 'field' value as the only field."
     )
-    ap.add_argument("--workers", type=int, default=None, help="並列ワーカー数（未指定: 自動）")
-    # cfg 作成時に渡す
-
 
     # 既定値（重要：デフォルトで “全フィールド反演” にする）
     ap.set_defaults(invert=True, invert_all=True)
 
-    ns = ap.parse_args()
 
+    ns = ap.parse_args()
     cfg = ERTForwardConfig(
         pca=ns.pca, Z_path=ns.Z_path, out=ns.out,
         n_fields=ns.n_fields, field_offset=ns.field_offset, fields=ns.fields, 
@@ -826,8 +752,7 @@ if __name__ == "__main__":
         mode=ns.mode, noise_rel=ns.noise_rel, seed=ns.seed,
         invert=ns.invert, invert_out=ns.invert_out,
         invert_all=getattr(ns, "invert_all", True), inv_npz_out=ns.inv_npz_out, inv_save_all_png=getattr(ns, "inv_save_all_png", False),
-        field_from_npz=getattr(ns, "field_from_npz", None), workers=getattr(ns, "workers", None),
-
+        field_from_npz=getattr(ns, "field_from_npz", None),
     )
     out = run(cfg)
     print("Done. Output:", out)

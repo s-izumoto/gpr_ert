@@ -68,7 +68,6 @@ KEYMAP = {
 
     # parallel & misc
     ("misc", "seed"): "--seed",
-    ("misc", "workers"): "--workers",
 
     # top-level convenience
     ("root", "out"): "--out",

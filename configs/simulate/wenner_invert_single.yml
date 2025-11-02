@@ -31,8 +31,7 @@ forward:
   noise_rel: 0.02
 
 misc:
-  seed: 42
-  workers: null
+  seed: 0
 
 output:
   invert: true
