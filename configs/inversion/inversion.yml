@@ -1,0 +1,29 @@
+# configs/inversion_example.yml
+# 必須
+npz: data/processed/gpr_seq_logs/20251101_223404/seq_logs_bundle.npz
+
+# 出力先
+out_dir: data/processed/inversion_out         # 省略時は npz と同じフォルダ
+bundle_out: data/processed/inversion_out/inversion_bundle
+
+# 画像
+# 既定: 最初のフィールドのみ保存（linear/log）
+# 全フィールドの画像を保存したい場合は true
+images_all: false
+# 個別にファイル名を指定したい場合（省略可）
+# out: "./inversion_out/inversion_first.png"
+# out_log: "./inversion_out/inversion_first_log.png"
+
+# 対象フィールド
+# all_fields: true にすると見つかった全フィールドを反演
+all_fields: true
+# field_index: 0   # 単一フィールドだけ反演したい場合に指定
+
+# 幾何パラメータ
+n_elec: 32
+dx_elec: 1.0
+margin: 3.0
+world_Lx: 31.0
+nx_full: 400
+nz_full: 100
+mesh_area: 0.1

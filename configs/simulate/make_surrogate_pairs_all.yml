@@ -8,7 +8,7 @@ Z: data/interim/pca/Z.npz
 out: data/interim//ert_all_subset
 
 # Field selection
-n_fields: 5          # use all rows from Z (or set a positive number)
+n_fields: 6000          # use all rows from Z (or set a positive number)
 field_offset: 0
 
 # Domain / mesh

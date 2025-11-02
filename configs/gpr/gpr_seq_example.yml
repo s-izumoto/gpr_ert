@@ -1,0 +1,41 @@
+# configs/gpr_seq_example.yml
+# Minimal YAML to drive sequential design runner.
+
+# --- IO ---
+pca_joblib: data/interim/pca/pca_joint.joblib
+Z_path: data/interim/pca/Z.npz
+warmup_npz: data/interim/ert_wenner_subset/ert_surrogate_wenner.npz
+out_dir: data/processed/gpr_seq_logs/
+
+# --- Design space ---
+n_elec: 32
+min_gap: 1
+arrays: ["wenner", "schlumberger", "dipole"]   # requires your ERTDesignSpace to accept arrays=...
+dd_kmax: 6
+schl_a_max: null
+grad_kmax: null
+
+# --- GP & acquisition ---
+acquisition: "MI"       # "LCB" | "UCB" | "EI" | "MAXVAR" | "MI"
+kernel_compose: "sum"    # "sum" | "prod"
+kappa: 2.0
+xi: 0.01
+noise_level: 1.0e-4
+normalize_y: true
+use_metric_feats: true
+n_restarts: 10
+
+# --- Candidates / steps ---
+random_candidates: 4000
+warmup_steps: 35
+total_steps: 155
+
+# --- Run ---
+seed: 42
+log_every_step: true
+
+y_dataset: data/interim/ert_all_subset/ert_surrogate_all.npz
+y_dataset_col: "y" 
+fields: [0, 2]
+
+fields_from_medoids: data/processed/pca_clusters_k50/medoids_index.npz

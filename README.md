@@ -13,32 +13,32 @@
    python scripts/02_fit_pca_and_project.py --config configs/pca/pca_randomized.yml
    ```
 
-3. **Simulate ERT measurements (pyGIMLi physics forward)**  
+3. **Simulate ERT measurements in all the arrays (pyGIMLi physics forward)**  
+
+
    ```bash
-   python scripts/03_make_surrogate_pairs_pygimli.py --config configs/simulate/make_surrogate_pairs.yml
-   ```
-   ```bash
-   python scripts/03_make_surrogate_pairs_wenner.py --config configs/simulate/make_surrogate_pairs_wenner.yml
+   python scripts/03_make_surrogate_pairs_all.py --config configs/simulate/make_surrogate_pairs_all.yml
    ```
 
-4. **Build oracle masks (high-gradient regions)**  
+4. **Simulate ERT measurements in Wenner array (pyGIMLi physics forward)**  
    ```bash
-   python scripts/04_make_oracle_masks.py --config configs/oracle/make_oracle.yml
+   python scripts/04_make_surrogate_pairs_wenner.py --config configs/simulate/make_surrogate_pairs_wenner.yml
    ```
 
-5. **Reduce & diversify oracle masks (indices only)**  
+5. **Inversion of Wenner array**  
    ```bash
-   python scripts/04b_reduce_oracle_diversity.py --config configs/oracle/reduce_oracle.yml
+   python scripts/05_make_surrogate_wenner_invert.py --config configs/simulate/wenner_invert.yml
    ```
 
-6. **Train surrogate model (ERT approximation)**  
+6. **Gaussian process regression (GPR)**  
    ```bash
-   python scripts/05_train_surrogate.py --config configs/surrogate/train_surrogate.yml
+   python scripts/06_gpr_sequential_design.py --config configs/gpr/gpr_seq_example.yml
    ```
 
-7. **Evaluate surrogate model**  
+7. **Inversion of GPR results**  
    ```bash
-   python scripts/06_eval_surrogate.py --config configs/eval/eval_surrogate.yml
+   python scripts/07_invert_from_npz.py --config configs/inversion/inversion.yml
    ```
+
 
 ---

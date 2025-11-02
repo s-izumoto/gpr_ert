@@ -27,6 +27,7 @@ jupyter_cache/
 .vscode/*
 !.vscode/settings.json
 !.vscode/extensions.json
+.vscode/
 
 # Data / Figures / Reports (generated or large)
 data/

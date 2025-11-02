@@ -8,7 +8,6 @@ GPRを教師に使い、連続空間で獲得関数を最大化 → 離散デザ
 外部出力との接続:
 - PCA: pca_ops.py (= build_pca_latent.py) の pca_joint.joblib と Z.npz を使用
 - Warmup: ert_physics_forward_wenner.py の rows.npz（例）から ABMN と y を使用
-- Surrogate: train_ert_surrogate.py の学習出力 (model .pt と scaler_meta.npz) を使用
 """
 import os
 # GUIを使わないバックエンドに固定
@@ -18,41 +17,27 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")  # 念のため
 import matplotlib
 matplotlib.use("Agg", force=True)
 from dataclasses import dataclass
-from typing import Callable, List, Tuple, Optional, Dict
+from typing import List, Tuple, Optional, Dict
 from pathlib import Path
 import numpy as np
-import math
 
 # scikit-learn のGPR
 from sklearn.gaussian_process import GaussianProcessRegressor
 from sklearn.gaussian_process.kernels import RBF, WhiteKernel
 from sklearn.gaussian_process.kernels import Kernel
-from sklearn.gaussian_process.kernels import Sum, Product
 from design import map_uv_to_embed, ERTDesignSpace
 import torch
-# 追加 import
 from sklearn.model_selection import LeaveOneOut
 from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
 from scipy.stats import norm
 import argparse, sys
-from matplotlib.colors import LogNorm
 import matplotlib.pyplot as plt
 
-try:
-    from scipy.optimize import minimize
-    SCIPY_AVAILABLE = True
-except Exception:
-    SCIPY_AVAILABLE = False
 
 # ====== ここだけあなたの環境に合わせてください ======
 PCA_JOBLIB     = Path("../data/interim/pca/pca_joint.joblib")    # pca_ops.py が出力
 PCA_Z_PATH     = Path("../data/interim/pca/Z.npz")               # 同上（単一ベクトルなら .npy でもOK）
 WARMUP_NPZ     = Path("../data/interim/ert_wenner_subset/ert_surrogate_wenner.npz")       # ert_physics_forward_wenner.py の出力（例）
-SURR_DIR       = Path("../models/ert_surrogate")                # train_ert_surrogate.py --out
-SURR_WEIGHTS   = SURR_DIR / "best_model.pt"                     # ベストのstate_dict（あなたの保存名に合わせて）
-SURR_SCALER    = SURR_DIR / "scaler_meta.npz"             # 標準化スケーラとメタ
-USE_WENNER_POOL_SNAP = False                              # True: Wenner-α列挙プール最近傍でスナップ
-ACTIVE_ELEC_IDX = None                                    # 例: [0,2,4,...] 16本など。Noneで全32から
 # ==== Reciprocity 一意化済みデザイン空間 ====
 N_ELECS = 32
 MIN_GAP = 1
@@ -256,45 +241,6 @@ def _subset_npz_by_Z(npz_path: Path, z_sel: np.ndarray, *, rtol=1e-5, atol=1e-7)
         raise RuntimeError(f"{npz_path} に一致する Z の行が見つかりません（field-index / PCA と不整合）")
     return {k: (d[k][m] if hasattr(d[k], "shape") and d[k].shape[0]==Z_all.shape[0] else d[k]) for k in d.files}
 
-def load_y_dataset_lookup(npz_path: str, col: str = "y", *, field_vec: "np.ndarray | None" = None):
-    """
-    （変更点）
-    - field_vec が与えられたら NPZ を Z 一致でサブセットしてから辞書化
-    """
-    d_full = np.load(npz_path, allow_pickle=True)
-
-    # Zサブセット（必要時）
-    if field_vec is not None:
-        if "Z" not in d_full.files:
-            raise RuntimeError("y-dataset NPZ に Z がありません（Z を保存して再生成してください）。")
-        Z_all = d_full["Z"].astype(np.float32)
-        m = np.all(np.isclose(Z_all, field_vec[None, :].astype(np.float32), rtol=1e-5, atol=1e-7), axis=1)
-        if not np.any(m):
-            raise RuntimeError("y-dataset の Z と --field-index の Z が一致しません。")
-        # サブセット dict を再構築
-        d = {k: (d_full[k][m] if hasattr(d_full[k], "shape") and d_full[k].shape[0]==Z_all.shape[0] else d_full[k])
-             for k in d_full.files}
-    else:
-        d = d_full
-
-    if "ABMN" not in d:
-        raise RuntimeError("NPZ に ABMN が見つかりません。ert_physics_forward_all.py の出力を指定してください。")
-    ABMN = d["ABMN"].astype(int)  # [N,4], 1-based
-
-    if col == "y":
-        if "y" not in d:
-            raise RuntimeError("NPZ に y がありません（--y-dataset-col rhoa を試すか、生成側で y を保存）。")
-        Y = d["y"].astype(float)  # log10(rhoa)
-    else:
-        if "rhoa" not in d:
-            raise RuntimeError("NPZ に rhoa がありません（--y-dataset-col y を使うか、生成側でrhoaを保存）。")
-        Y = np.log10(d["rhoa"].astype(float))
-
-    lut = {}
-    for p, val in zip(ABMN, Y):
-        lut[_canonical_pair(tuple(map(int, p)))] = float(val)
-    return lut
-
 
 # ====== Array enumerators (1-based indices) ======
 def enumerate_wenner_pairs(n: int, min_gap: int = 1):
@@ -387,6 +333,21 @@ def build_allowed_pairs(
     uniq = sorted({_canon(p) for p in allowed})
     return uniq
 
+# === DEBUG helpers (1-based canonical + 0-based検出) ===
+def _canon_debug(p):
+    A,B,M,N = map(int, p)
+    if A > B: A,B = B,A
+    if M > N: M,N = N,M
+    d1, d2 = (A,B), (M,N)
+    return (d1[0], d1[1], d2[0], d2[1]) if d1 <= d2 else (d2[0], d2[1], d1[0], d1[1])
+
+def _looks_zero_based(abmn_array, n_elec):
+    try:
+        amin = int(abmn_array.min())
+        amax = int(abmn_array.max())
+        return (amin == 0) or (amax == (n_elec - 1))
+    except Exception:
+        return False
 
 # === NEW: metric features scaler & sigma calibration ===
 class MetricFeatsScaler:
@@ -421,68 +382,137 @@ def sigma_calibration_scale(y: np.ndarray, mu: np.ndarray, std: np.ndarray) -> f
 def apply_sigma_calibration(std: np.ndarray, s: float) -> np.ndarray:
     return std * max(1e-12, s)
 
+# ====== SAFE REPLACEMENT for _log_gpr_per_step ======
 def _log_gpr_per_step(
     step_idx: int,
-    phase: str,                 # "warmup" or "active"
-    X_raw: np.ndarray,          # これまでの [0,1]^4 特徴
-    y_obs: np.ndarray,          # これまでの y
-    cfg: Config,
+    phase: str,
+    X_raw: np.ndarray,
+    y_obs: np.ndarray,
+    cfg: "Config",
     scaler: "MetricFeatsScaler | None",
-    csv_path: "Path",
-    gp: "GaussianProcessRegressor",   # ← fit 済みの gp
+    csv_path: "Path | None",
+    gp: "GaussianProcessRegressor",
+    field_index: int,
+    append: bool = True,
+    as_np_buffer: "list[dict] | None" = None,
 ):
-    # --- 特徴変換（fit は絶対にしない） ---
-    if scaler is not None:
-        X_feat = scaler.transform(X_raw)
-    else:
-        X_feat = X_raw.astype(np.float64)
+    import os, csv
+    from sklearn.metrics import mean_squared_error, r2_score
 
-    # --- 合成カーネルから dist/pos の length_scale と noise を抽出 ---
+    # --- 特徴変換（fitはしない） ---
+    X_feat = scaler.transform(X_raw) if (scaler is not None) else np.asarray(X_raw, dtype=float)
+
+    # --- カーネルとパラメータ抽出の安全化 ---
     k = gp.kernel_
-    dist_ls, pos_ls, noise_var = _extract_ls_noise_from_kernel(k)
+    dist_ls, pos_ls, noise_var = None, None, None
 
-    # フォールバック（見つからない場合に NaN）
-    dist_ls = np.array(dist_ls if dist_ls is not None else [np.nan, np.nan], dtype=float)
-    pos_ls  = np.array(pos_ls  if pos_ls  is not None else [np.nan, np.nan], dtype=float)
-    noise_var = float(noise_var if noise_var is not None else np.nan)
+    # 既存の抽出関数があれば優先的に使う
+    try:
+        # 例: すでにあなたのコードにある想定の関数
+        # 戻り値: (dist_ls_array_like, pos_ls_array_like, noise_var_scalar)
+        dist_ls, pos_ls, noise_var = _extract_ls_noise_from_kernel(k)  # noqa
+    except Exception:
+        # フォールバック: 合成カーネルから手探りで拾う（見つからなければNaNへ）
+        try:
+            # WhiteKernel (雑音)
+            if hasattr(k, "k1") and hasattr(k, "k2"):
+                # 合成のどちらかに WhiteKernel がぶら下がっている可能性
+                def _find_white(ker):
+                    if ker.__class__.__name__ == "WhiteKernel":
+                        return float(getattr(ker, "noise_level", np.nan))
+                    for child in ("k1", "k2"):
+                        if hasattr(ker, child):
+                            v = _find_white(getattr(ker, child))
+                            if v is not None:
+                                return v
+                    return None
+                nv = _find_white(k)
+                noise_var = float(nv) if (nv is not None) else None
+            else:
+                # WhiteKernel でない単体
+                if k.__class__.__name__ == "WhiteKernel":
+                    noise_var = float(getattr(k, "noise_level", np.nan))
+        except Exception:
+            pass
 
-    # LML（最適化後の現在の theta を渡す）
-    lml = float(gp.log_marginal_likelihood(gp.kernel_.theta))
+        # dist/pos のRBF長さスケールを拾う（SliceKernel想定がなくても動く範囲で）
+        ls_list = []
+        def _collect_rbf_ls(ker):
+            cname = ker.__class__.__name__
+            if cname in ("RBF", "RBFKernel"):  # sklearnはRBF
+                ls = getattr(ker, "length_scale", None)
+                if ls is not None:
+                    ls_list.append(np.atleast_1d(np.asarray(ls, dtype=float)))
+            for child in ("k1", "k2"):
+                if hasattr(ker, child):
+                    _collect_rbf_ls(getattr(ker, child))
+        try:
+            _collect_rbf_ls(k)
+        except Exception:
+            pass
+        # もし2本のRBFがあれば [0,1]→dist, [2,3]→pos とみなす
+        if len(ls_list) >= 1:
+            # 既知の設計では dist(2次元) + pos(2次元) を想定
+            # それ以外でも、先頭から順に埋める
+            flat = np.concatenate(ls_list, dtype=float) if len(ls_list) > 1 else ls_list[0]
+            if flat.size >= 2:
+                dist_ls = flat[:2]
+            if flat.size >= 4:
+                pos_ls = flat[2:4]
+
+    # --- NaN安全化（未取得でも必ず2要素を用意） ---
+    dist_arr = np.full(2, np.nan, dtype=float)
+    pos_arr  = np.full(2, np.nan, dtype=float)
+    if dist_ls is not None:
+        dist_arr[:min(2, np.size(dist_ls))] = np.asarray(dist_ls, dtype=float).ravel()[:2]
+    if pos_ls is not None:
+        pos_arr[:min(2, np.size(pos_ls))] = np.asarray(pos_ls, dtype=float).ravel()[:2]
+    noise_val = float(noise_var) if (noise_var is not None) else np.nan
+
+    # --- LML（value_があればそれ、なければ計算） ---
+    try:
+        lml = float(getattr(gp, "log_marginal_likelihood_value_", gp.log_marginal_likelihood()))
+    except Exception:
+        lml = float("nan")
 
     # --- in-sample 指標 ---
-    mu_tr, _std_tr = gp.predict(X_feat, return_std=True)
-    rmse = float(np.sqrt(mean_squared_error(y_obs, mu_tr)))
-    mae  = float(mean_absolute_error(y_obs, mu_tr))
-    r2   = float(r2_score(y_obs, mu_tr))
+    try:
+        mu_tr = gp.predict(X_feat, return_std=False)
+        rmse = float(np.sqrt(mean_squared_error(y_obs, mu_tr)))
+        mae  = float(np.mean(np.abs(y_obs - mu_tr)))
+        r2   = float(r2_score(y_obs, mu_tr))
+    except Exception:
+        rmse = mae = r2 = float("nan")
 
-    # --- print ログ（確認用） ---
-    print(f"[gpr] step={step_idx:02d} phase={phase} | kernel={k} | LML={lml:.3f}")
-    print(f"[gpr]   dist length_scales={np.array2string(dist_ls, precision=4)}  "
-          f"pos length_scales={np.array2string(pos_ls, precision=4)}  "
-          f"noise_var={noise_var:.6g}")
-    print(f"[gpr]   train RMSE/MAE/R2 = {rmse:.4g}/{mae:.4g}/{r2:.4f}")
+    # --- 1行分（CSV/NPZ用） ---
+    row = {
+        "field": int(field_index),
+        "step": int(step_idx),
+        "phase": str(phase),
+        "kernel": str(k),
+        "dist_ls0": float(dist_arr[0]),
+        "dist_ls1": float(dist_arr[1]),
+        "pos_ls0":  float(pos_arr[0]),
+        "pos_ls1":  float(pos_arr[1]),
+        "noise_var": float(noise_val),
+        "LML": float(lml),
+        "train_rmse": float(rmse),
+        "train_mae":  float(mae),
+        "train_r2":   float(r2),
+    }
 
-    # --- CSV 追記 ---
-    import csv
-    csv_path.parent.mkdir(parents=True, exist_ok=True)
-    header = [
-        "step","phase","n","kernel",
-        "dist_ls0","dist_ls1","pos_ls0","pos_ls1",
-        "noise_var","LML","train_rmse","train_mae","train_r2"
-    ]
-    row = [
-        int(step_idx), phase, int(len(y_obs)), str(k),
-        f"{dist_ls[0]:.8g}", f"{dist_ls[1]:.8g}",
-        f"{pos_ls[0]:.8g}",  f"{pos_ls[1]:.8g}",
-        f"{noise_var:.8g}", f"{lml:.8g}",
-        f"{rmse:.8g}", f"{mae:.8g}", f"{r2:.8g}",
-    ]
-    write_header = (not csv_path.exists())
-    with open(csv_path, "a", newline="") as f:
-        w = csv.writer(f)
-        if write_header:
-            w.writerow(header)
-        w.writerow(row)
+    if as_np_buffer is not None:
+        as_np_buffer.append(row)
+
+    if csv_path is not None:
+        header = list(row.keys())
+        write_header = (not append) or (not os.path.exists(csv_path))
+        with open(csv_path, "a" if append else "w", newline="", encoding="utf-8") as f:
+            w = csv.DictWriter(f, fieldnames=header)
+            if write_header:
+                w.writeheader()
+            w.writerow(row)
+# ====== END REPLACEMENT ======
 
 
 def _log_candidate_stats(
@@ -493,23 +523,36 @@ def _log_candidate_stats(
     std: "np.ndarray | None",
     chosen_idx: "int | None",
     csv_path: "Path",
+    field_index: int,           # ← 追加済みでOK
+    append: bool = True,        # ← 追加済みでOK
 ):
     import csv
+    import os                   # ← 追加
     def _stats(x):
-        if x is None or len(x) == 0:
+        if x is None:
             return dict(n=0, mean=np.nan, std=np.nan, vmin=np.nan, vmax=np.nan)
         x = np.asarray(x, dtype=float).ravel()
-        return dict(n=len(x), mean=float(np.mean(x)), std=float(np.std(x)),
+        if x.size == 0:
+            return dict(n=0, mean=np.nan, std=np.nan, vmin=np.nan, vmax=np.nan)
+        return dict(n=int(x.size), mean=float(np.mean(x)), std=float(np.std(x)),
                     vmin=float(np.min(x)), vmax=float(np.max(x)))
 
     S_acq = _stats(acq_vals)
     S_mu  = _stats(mu)
     S_sd  = _stats(std)
-    chosen = dict(
-        acq = float(acq_vals[chosen_idx]) if (acq_vals is not None and chosen_idx is not None) else np.nan,
-        mu  = float(mu[chosen_idx])        if (mu is not None and chosen_idx is not None) else np.nan,
-        sd  = float(std[chosen_idx])       if (std is not None and chosen_idx is not None) else np.nan,
-    )
+
+    # chosen 値の安全な抽出
+    chosen = dict(acq=np.nan, mu=np.nan, sd=np.nan)
+    try:
+        if chosen_idx is not None:
+            if acq_vals is not None and S_acq["n"] > 0:
+                chosen["acq"] = float(np.asarray(acq_vals).ravel()[int(chosen_idx)])
+            if mu is not None and S_mu["n"] > 0:
+                chosen["mu"]  = float(np.asarray(mu).ravel()[int(chosen_idx)])
+            if std is not None and S_sd["n"] > 0:
+                chosen["sd"]  = float(np.asarray(std).ravel()[int(chosen_idx)])
+    except Exception:
+        pass
 
     print(
       f"[cand] step={step_idx:02d} phase={phase} | M={S_acq['n']} "
@@ -519,25 +562,30 @@ def _log_candidate_stats(
       f"| chosen(acq,mu,sd)=({chosen['acq']:.4g},{chosen['mu']:.4g},{chosen['sd']:.4g})"
     )
 
+    # csv_path は Path/str どちらでもOKに
+    from pathlib import Path as _P
+    csv_path = _P(csv_path)
+
     csv_path.parent.mkdir(parents=True, exist_ok=True)
     header = [
-        "step","phase","M",
+        "field","step","phase","M",
         "acq_mean","acq_std","acq_min","acq_max",
         "mu_mean","mu_std","mu_min","mu_max",
         "sd_mean","sd_std","sd_min","sd_max",
         "chosen_acq","chosen_mu","chosen_sd"
     ]
-    write_header = (not csv_path.exists())
     row = [
-        int(step_idx), phase, int(S_acq["n"]),
+        int(field_index), int(step_idx), phase, int(S_acq["n"]),
         S_acq["mean"], S_acq["std"], S_acq["vmin"], S_acq["vmax"],
         S_mu["mean"],  S_mu["std"],  S_mu["vmin"],  S_mu["vmax"],
         S_sd["mean"],  S_sd["std"],  S_sd["vmin"],  S_sd["vmax"],
         chosen["acq"], chosen["mu"], chosen["sd"]
     ]
-    with open(csv_path, "a", newline="") as f:
+    write_header = (not append) or (not os.path.exists(csv_path))
+    with open(csv_path, "a" if append else "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
-        if write_header: w.writerow(header)
+        if write_header:
+            w.writerow(header)
         w.writerow(row)
 
 # ====== ert_physics_forward_wenner の小物を再利用（必要最小限） ======
@@ -592,7 +640,6 @@ def _abmn_unit_to_dmm(x_unit: np.ndarray) -> np.ndarray:
 
 def _acquisition_values(cfg: Config, mu: np.ndarray, sigma: np.ndarray, y_best: float,
                         observed_noise_var: float | None = None) -> np.ndarray:
-    from scipy.stats import norm
     A = cfg.acquisition.upper()
     if A == "LCB":
         return mu - cfg.kappa * sigma
@@ -601,7 +648,6 @@ def _acquisition_values(cfg: Config, mu: np.ndarray, sigma: np.ndarray, y_best: 
     elif A == "EI":
         z = (mu - y_best - cfg.xi) / (sigma + 1e-12)
         return (mu - y_best - cfg.xi) * norm.cdf(z) + sigma * norm.pdf(z)
-        pass
     elif A == "MAXVAR":
         # 予測分散そのものを最大化（= 欲しいのは情報）
         return sigma**2
@@ -618,20 +664,20 @@ def _acquisition_values(cfg: Config, mu: np.ndarray, sigma: np.ndarray, y_best: 
 # ロード系（ここを実装）
 # =========================
 
-def load_pca_field():
+def load_pca_field(field_index: int):
     """
-    pca_joint.joblib & Z.npz から 1ケース分のZ(=k_lat,) を返す（--field-index に従う）
+    pca_joint.joblib & Z.npz から 1ケース分のZ(=k_lat,) を返す
     """
     from joblib import load as joblib_load
     meta = joblib_load(PCA_JOBLIB)
     k_lat = int(meta["components"].shape[0])
-    # --field-index を使用
-    z_row = _load_Z_row(PCA_Z_PATH, args.field_index, k_lat_limit=k_lat)
+    z_row = _load_Z_row(PCA_Z_PATH, field_index, k_lat_limit=k_lat)
     return z_row
 
-def load_warmup_designs_and_observations() -> Tuple[List[Tuple[int,int,int,int]], Optional[np.ndarray]]:
+
+def load_warmup_designs_and_observations(field_index: int) -> Tuple[List[Tuple[int,int,int,int]], Optional[np.ndarray]]:
     # ① PCA から選択Z
-    field = load_pca_field()  # (k_lat,)
+    field = load_pca_field(field_index)  # (k_lat,)
     # ② warmup NPZ を Z 一致でサブセット
     d = _subset_npz_by_Z(WARMUP_NPZ, np.asarray(field, dtype=np.float32))
     if "ABMN" not in d or "y" not in d:
@@ -643,7 +689,6 @@ def load_warmup_designs_and_observations() -> Tuple[List[Tuple[int,int,int,int]]
     if ABMN.shape[0] < N_WARMUP or y.shape[0] < N_WARMUP:
         raise RuntimeError(f"Warmup不足: ABMN={ABMN.shape[0]}, y={y.shape[0]} (< {N_WARMUP})")
 
-    # 先頭35行採用（生成を固定順にしている前提）
     warm_idx = np.arange(N_WARMUP, dtype=int)
     abmn35 = [_canonical_pair(tuple(map(int, row))) for row in ABMN[warm_idx]]
     y35    = y[warm_idx].astype(np.float32)
@@ -658,33 +703,13 @@ def _canonical_pair(p):
         dip1, dip2 = dip2, dip1
     return (dip1[0], dip1[1], dip2[0], dip2[1])
 
-def snap_to_valid(x_cont: np.ndarray) -> Tuple[int,int,int,int]:
-    """
-    [0,1]^4 の連続提案 → design.py の埋め込み空間へ写像 → 相反一意集合の最近傍へスナップ → 正規形 (A,B,M,N) を返す
-    ※ ACTIVE_ELEC_IDX を使った制限は、必要なら DSPACE をサブセット化して作り直してください
-    """
-    # 1) 連続ベクトル → 埋め込み [dAB/L, dMN/L, mAB/L, mMN/L]
-    x = np.asarray(x_cont, dtype=np.float32).reshape(1,4)
-    e = map_uv_to_embed(
-        torch.from_numpy(x),
-        n_elecs=DSPACE.n_elecs,
-        min_gap=DSPACE.min_gap
-    ).detach().cpu().numpy().reshape(4)
-
-    # 2) 埋め込み最近傍の相反一意デザインへスナップ
-    idx = DSPACE.nearest_1(e)          # 相反重複なし集合の index
-    A,B,M,N = DSPACE.pairs[idx]        # 1-based の (A,B,M,N)
-
-    # 3) 念のため正規形へ（(A,B) と (M,N) 入れ替えの同一視）
-    return _canonical_pair((A,B,M,N))
-
 # ============== DSPACE サンプリング ==============
 def _pick_dspace_candidates(selected_canon: set, n_cand: int, rng: np.random.Generator):
     """
     DSPACE（相反一意化済み）の全離散設計から、未選択の候補を最大 n_cand 抽出して返す。
     戻り値:
       idx_cand:   候補の DSPACE インデックス (np.ndarray[*,])
-      X_cand:     候補の [0,1]^4 特徴（_to_unit_box(ABMN)で作成）(np.ndarray[*,4])
+      X_cand: 候補の [0,1]^4 特徴（ABMN→unit→dmm で作成）
       pairs_cand: 候補の (A,B,M,N) タプルのリスト（1-based）
     """
     pairs = list(DSPACE.pairs)  # [(A,B,M,N), ...] 1-based
@@ -736,7 +761,7 @@ def _build_warmup_dataset_from_file(n_warmup: int = 35):
     return X_warm, y_warm, ABMN_warm, idx_warm
 
 def _print_warmup_designs_with_y(ABMN_warm: np.ndarray, X_warm: np.ndarray, y_warm: np.ndarray):
-    # X_warm は [0,1]^4 の ABMN。表示用に Dnorm を再計算する
+    # 表示は ABMN_warm から Dnorm を再計算して行う（X_warm は参照しない）
     ne = N_ELECS
     L_world = 31.0
     margin  = 3.0
@@ -807,7 +832,8 @@ def _rmse(y_true, y_pred):
 def run_warmup_gpr_check(n_warmup: int = 35, *, noise_level: float = 1e-4, normalize_y: bool = True, seed: int = 0) -> GPRWarmupReport:
     X, y, ABMN_warm, idx_warm = _build_warmup_dataset_from_file(n_warmup=n_warmup)
     if args.use_metric_feats:
-        X = _apply_snap_metric_to_feats(X)
+        scaler = MetricFeatsScaler(DSPACE).fit(X)  # X は dmm を想定
+        X = scaler.transform(X)
     _print_warmup_designs_with_y(ABMN_warm, X, y)
     # 学習
     gpr = _fit_gpr_warmup(X, y, noise_level=noise_level, normalize_y=normalize_y, seed=seed)
@@ -891,16 +917,15 @@ def _print_verify(tag: str, Z_block: np.ndarray, z_seq: np.ndarray):
 # =========================
 # メイン
 # =========================
-def run_sequential_design(cfg: Config, ne: int, total_steps: int) -> Dict[str, np.ndarray]:
+def run_sequential_design(cfg: Config, ne: int, total_steps: int, field_index: int) -> Dict[str, np.ndarray]:
     rng = np.random.default_rng(cfg.seed)
 
-    field = load_pca_field()  # --field-index で選んだ Z（k_lat,）
+    field = load_pca_field(field_index)  # ← 引数で受け取る
 
-    # 1) warmup（Wenner）を Z でサブセットして、直後にZ整合チェック
+    # warmup をサブセット & 整合チェック
     warm_view = _subset_npz_by_Z(WARMUP_NPZ, np.asarray(field, dtype=np.float32))
     _print_verify("warmup-vs-seq", warm_view["Z"], field)
 
-    # warmup の ABMN,y を先頭35本に揃える
     assert cfg.warmup_steps == 35
     ABMN_w = warm_view["ABMN"].astype(np.int32)
     y_w    = warm_view["y"].astype(np.float32)
@@ -911,19 +936,73 @@ def run_sequential_design(cfg: Config, ne: int, total_steps: int) -> Dict[str, n
     warmup_designs = [_canonical_pair(tuple(map(int, row))) for row in ABMN_w[warm_idx]]
     y_warmup       = y_w[warm_idx]
 
-    # 2) active（dataset=all 等）も Z でサブセットして、直後にZ整合チェック → y辞書
-    if args.y_source == "dataset":
-        data_view = _subset_npz_by_Z(Path(args.y_dataset), np.asarray(field, dtype=np.float32))
-        _print_verify("dataset-vs-seq", data_view["Z"], field)
+    # active 側も Z でサブセット
+    data_view = _subset_npz_by_Z(Path(args.y_dataset), np.asarray(field, dtype=np.float32))
+    _print_verify("dataset-vs-seq", data_view["Z"], field)
 
-        ABMN_all = data_view["ABMN"].astype(np.int32)
-        if args.y_dataset_col == "y":
-            Y_all = data_view["y"].astype(np.float32)              # log10(rhoa)
-        else:
-            Y_all = np.log10(data_view["rhoa"].astype(np.float32)) # 必要ならrhoa→log10
-        y_lut = { _canonical_pair(tuple(map(int, p))) : float(v) for p, v in zip(ABMN_all, Y_all) }
+    ABMN_all = data_view["ABMN"].astype(np.int32)
+    if args.y_dataset_col == "y":
+        Y_all = data_view["y"].astype(np.float32)              # log10(rhoa)
     else:
-        y_lut = None
+        Y_all = np.log10(data_view["rhoa"].astype(np.float32)) # 必要ならrhoa→log10
+    y_lut = { _canonical_pair(tuple(map(int, p))) : float(v) for p, v in zip(ABMN_all, Y_all) }
+
+    print("[debug] y_lut size:", len(y_lut))
+    print("[debug] has (1,11,21,31)?", _canon_debug((1,11,21,31)) in y_lut)
+
+
+    _dbg_allowed_pairs = [p for p in DSPACE.pairs if _canonical_pair(p) in y_lut]
+    if not _dbg_allowed_pairs:
+        raise RuntimeError("No overlapping designs between allowed_pairs and y_dataset. "
+                        "Align arrays/k-limits or regenerate y_dataset.")
+
+    print("[debug] allowed_pairs after y_lut filter:", len(_dbg_allowed_pairs))
+    print("[debug] coverage example (first 3):", [
+        _canonical_pair(_dbg_allowed_pairs[i]) in y_lut for i in range(min(3, len(_dbg_allowed_pairs)))
+    ])
+
+
+    # ============ DIAG START: per-array overlap vs y_lut ============
+    def _canon(p):
+        A,B,M,N = map(int, p)
+        if A > B: A,B = B,A
+        if M > N: M,N = N,M
+        d1, d2 = (A,B), (M,N)
+        return (d1[0], d1[1], d2[0], d2[1]) if d1 <= d2 else (d2[0], d2[1], d1[0], d1[1])
+
+    def _count_overlap(tag, pairs_raw, y_lut):
+        pairs = { _canon(tuple(map(int,p))) for p in pairs_raw }
+        hit   = sum(1 for q in pairs if q in y_lut)
+        print(f"[diag] {tag:12s}  made={len(pairs):4d}  overlap={hit:4d}")
+
+    # n, min_gap, dd_kmax, schl_a_max は cfg（新）/ args（旧）の値を使う
+    # n = cfg.n_elec if "cfg" in locals() else N_ELECS
+    n = N_ELECS
+    min_gap = MIN_GAP
+    dd_kmax = args.dd_kmax
+    schl_a_max = args.schl_a_max
+    grad_kmax = getattr(cfg, "grad_kmax", None) if "cfg" in locals() else getattr(args, "grad_kmax", None)
+
+    pairs_w = enumerate_wenner_pairs(n, min_gap=min_gap)
+    pairs_s = enumerate_schlumberger_pairs(n, min_gap=min_gap, a_min=1, a_max=schl_a_max)
+    pairs_d = enumerate_dipole_dipole_pairs(n, min_gap=min_gap, k_min=1, k_max=dd_kmax)
+    pairs_g = enumerate_gradient_pairs(n, mn_k_min=1, mn_k_max=grad_kmax) if grad_kmax else []
+
+    print("[diag] n,min_gap,dd_kmax,schl_a_max,grad_kmax =", n, min_gap, dd_kmax, schl_a_max, grad_kmax)
+    _count_overlap("wenner",         pairs_w, y_lut)
+    _count_overlap("schlumberger",   pairs_s, y_lut)
+    _count_overlap("dipole-dipole",  pairs_d, y_lut)
+    if pairs_g:
+        _count_overlap("gradient",   pairs_g, y_lut)
+
+    # 総和（相反正規化で重複を潰してカウント）
+    import itertools as _it
+    all_pairs = list(_it.chain(pairs_w, pairs_s, pairs_d, pairs_g))
+    all_pairs_canon = { _canon(tuple(map(int,p))) for p in all_pairs }
+    print("[diag] TOTAL made =", len(all_pairs_canon),
+        "  TOTAL overlap =", sum(1 for q in all_pairs_canon if q in y_lut))
+    # ============ DIAG END ==========================================
+
 
     assert total_steps >= cfg.warmup_steps
 
@@ -943,8 +1022,10 @@ def run_sequential_design(cfg: Config, ne: int, total_steps: int) -> Dict[str, n
         designs_disc.append(d_can)
         selected_canon.add(d_can)
 
-        x_cont = _to_unit_box(np.array(d_can, dtype=float), ne) # 学習用特徴は従来通り [0,1]^4
-        X_cont_list.append(x_cont)
+        # ABMN([0,1]) → dmm([0,1]) に変換してから学習バッファに積む
+        x_unit = _to_unit_box(np.array(d_can, dtype=float), ne)   # [A,B,M,N] in [0,1]
+        x_dmm  = _abmn_unit_to_dmm(x_unit)                        # [dAB,dMN,mAB,mMN]
+        X_cont_list.append(x_dmm.astype(np.float64))
 
         y = float(y_warmup[t])
         print(f"[warmup] t={t:02d} design={d_can} y={y:.6g}")
@@ -975,6 +1056,8 @@ def run_sequential_design(cfg: Config, ne: int, total_steps: int) -> Dict[str, n
                 cfg=cfg, scaler=scaler,
                 csv_path=LOG_PARAMS_PATH,
                 gp=gp,
+                field_index=field_index,     # ← 追加
+                append=True                  # ← 追記モードで1つのCSVにまとめる
             )
 
 
@@ -1019,6 +1102,8 @@ def run_sequential_design(cfg: Config, ne: int, total_steps: int) -> Dict[str, n
                 cfg=cfg, scaler=scaler,                      # ★ 学習時と同じscaler
                 csv_path=LOG_PARAMS_PATH,
                 gp=gp,                                       # ★ fit済みを渡す
+                field_index=field_index,     # ← 追加
+                append=True                  # ← 追記モードで1つのCSVにまとめる
             )
 
         # === NEW: in-sample 近似で σ後校正係数を推定 ===
@@ -1071,6 +1156,8 @@ def run_sequential_design(cfg: Config, ne: int, total_steps: int) -> Dict[str, n
                 std=sigma,
                 chosen_idx=int(best_local),
                 csv_path=LOG_CAND_PATH,
+                field_index=field_index,     # ← 追加
+                append=True                  # ← 追加（束ねCSVに追記）
             )
 
 
@@ -1082,10 +1169,9 @@ def run_sequential_design(cfg: Config, ne: int, total_steps: int) -> Dict[str, n
         x_unit_next = _to_unit_box(np.array(d_next, dtype=float), ne)   # [A,B,M,N] in [0,1]
         x_dmm_next  = _abmn_unit_to_dmm(x_unit_next)                    # [dAB,dMN,mAB,mMN]
         X_cont_list.append(x_dmm_next.astype(np.float64))
-        if args.y_source == "dataset":
-            if d_next not in y_lut:
-                raise RuntimeError(f"指定NPZに選ばれた設計 {d_next} のyが見つかりません。NPZの配列（wenner/Schl/DDの範囲）とk上限を見直してください。")
-            y_next = y_lut[d_next]
+        if d_next not in y_lut:
+            raise RuntimeError(f"指定NPZに選ばれた設計 {d_next} のyが見つかりません。NPZの配列（wenner/Schl/DDの範囲）とk上限を見直してください。")
+        y_next = y_lut[d_next]
 
         print(f"[active] chosen={d_next} y={y_next:.6g}")
         y_list.append(float(y_next))
@@ -1151,13 +1237,6 @@ if __name__ == "__main__":
         help="予測分散の後校正方式"
     )
 
-    # 既存 argparse に追記
-    parser.add_argument(
-        "--y-source",
-        choices=["surrogate", "dataset"],
-        default="dataset",
-        help="yの取得元: surrogate=学習済みモデルで推論 / dataset=NPZからルックアップ"
-    )
     parser.add_argument(
         "--y-dataset",
         type=str,
@@ -1178,8 +1257,13 @@ if __name__ == "__main__":
         help="位置と距離のサブカーネルの合成方法: sum(和) / prod(積)。デフォルト: sum"
     )
 
-    parser.add_argument("--field-index", type=int, default = 0,
-        help="PCA Z.npz から使うフィールドの行インデックス")
+    parser.add_argument(
+        "--field-index",
+        type=int,
+        nargs="+",
+        default=[0,2],
+        help="PCA Z.npz から使うフィールドの行インデックス（複数可, 例: --field-index 0 3 7）"
+    )
     
     parser.add_argument(
         "--log-dir",
@@ -1195,75 +1279,131 @@ if __name__ == "__main__":
         help="ログのラン名（未指定なら日時+fieldで自動作成）"
     )
 
+    # argparse 付近に追加
+
+    parser.add_argument(
+        "--bundle-outputs",
+        action="store_true",
+        default=True,
+        help="複数フィールドの出力を1フォルダに束ね、seq_logは1つのNPZ、CSVも単一にまとめる（デフォルト: True）"
+    )
+    parser.add_argument(
+        "--no-bundle-outputs",
+        dest="bundle_outputs",
+        action="store_false",
+        help="出力をフィールドごとに分けたい場合はこのオプションを指定"
+    )
+
+    parser.add_argument(
+        "--bundle-csv-as",
+        choices=["csv", "npz"],
+        default="csv",
+        help="まとめた表形式ログをcsvで出すかnpzで出すか（既定: csv）"
+    )
 
     args, _ = parser.parse_known_args()
     from datetime import datetime
-    run_tag = args.log_run_tag or f'{datetime.now():%Y%m%d_%H%M%S}-field{int(args.field_index):03d}'
+
+    # === 1) 出力は単一フォルダにまとめる ===
+    run_tag = args.log_run_tag or f'{datetime.now():%Y%m%d_%H%M%S}'
     log_root = Path(args.log_dir)
-    log_run_dir = log_root / run_tag
-    log_run_dir.mkdir(parents=True, exist_ok=True)
+    LOG_RUN_DIR = log_root / run_tag
+    LOG_RUN_DIR.mkdir(parents=True, exist_ok=True)
+    print(f"[log] run dir : {LOG_RUN_DIR}")
 
-    
-    LOG_RUN_DIR     = log_run_dir
-    LOG_PARAMS_PATH = log_run_dir / f"gpr_params_field{int(args.field_index):03d}.csv"
-    LOG_CAND_PATH   = log_run_dir / f"candidate_stats_field{int(args.field_index):03d}.csv"
-    LOG_SEQLOG_PATH = log_run_dir / f"seq_log_field{int(args.field_index):03d}.npz"
+    # まとめ先のパス（npz と csv）
+    BUNDLE_SEQLOG_NPZ = LOG_RUN_DIR / "seq_logs_bundle.npz"
+    BUNDLE_GPR_CSV    = LOG_RUN_DIR / "gpr_params_bundle.csv"
+    BUNDLE_CAND_CSV   = LOG_RUN_DIR / "candidate_stats_bundle.csv"
 
-    print(f"[log] run dir : {log_run_dir}")
-    print(f"[log] params  : {LOG_PARAMS_PATH.name}")
-    print(f"[log] cand    : {LOG_CAND_PATH.name}")
-    print(f"[log] seqlog  : {LOG_SEQLOG_PATH.name}")
-
-    # Build restricted array pool and override DSPACE with it
+    # === 2) 使用する配列の構築と DSPACE の再生成（全フィールド共通） ===
     arrays = [a.strip() for a in args.arrays.split(',') if a.strip()]
-    allowed_pairs = build_allowed_pairs(N_ELECS, arrays, min_gap=MIN_GAP, dd_kmax=args.dd_kmax, schl_a_max=args.schl_a_max)
-    # Recreate DSPACE with the same metric but filtered pairs
+    allowed_pairs = build_allowed_pairs(
+        N_ELECS, arrays, min_gap=MIN_GAP, dd_kmax=args.dd_kmax, schl_a_max=args.schl_a_max
+    )
+
     DSPACE = ERTDesignSpace(n_elecs=N_ELECS, min_gap=MIN_GAP, metric=args.dspace_metric, allowed_pairs=allowed_pairs)
 
-    if args.check_warmup:
-        rep = run_warmup_gpr_check(
-            n_warmup=35,
-            noise_level=0.005,
-            normalize_y=True,
-            seed=args.seed,
-        )
-        print("\n=== GPR warm-up diagnostics (N=35) ===")
-        print(f"* kernel: {rep.kernel_str}")
-        print(f"* dist length_scales: {np.array2string(rep.dist_ls, precision=4)}")
-        print(f"*  pos length_scales: {np.array2string(rep.pos_ls,  precision=4)}")
-        print(f"* noise_var: {rep.noise_var:.6g}   LML: {rep.log_marginal_likelihood:.3f}")
-        print(f"* train  RMSE/MAE/R2: {rep.train_rmse:.4g} / {rep.train_mae:.4g} / {rep.train_r2:.4f}")
-        print(f"* LOOCV  RMSE/MAE/R2: {rep.loocv_rmse:.4g} / {rep.loocv_mae:.4g} / {rep.loocv_r2:.4f}")
-        print(f"* LOOCV  MLPD: {rep.loocv_mlpd:.4f}")
-        print(f"* Calibration hit rate: 68%→{100*rep.calib_hit_68:.1f}%   95%→{100*rep.calib_hit_95:.1f}%")
-        print(f"* Sigma calibration scale (LOOCV): {rep.sigma_scale:.3f}")
+    # === 3) まとめ用バッファ ===
+    bundle_field_indices: list[int] = []
+    bundle_seqlog_items: dict[str, np.ndarray] = {}  # 各フィールドの log を key に "_fieldXXX" を付けて格納
 
-        sys.exit(0)
-    
-        # --- PCA復元画像の自動保存（オプション不要、pca_ops仕様） ---
-    try:
-        arr2d = _reconstruct_field_2d_from_pca__pcaops(
-            field_idx=int(args.field_index),           # 既存の --field-index をそのまま使用
-            pca_joblib_path=PCA_JOBLIB,               # 例: Path("./pca_latent/pca_joint.joblib")
-            z_path=PCA_Z_PATH                         # 例: Path("./pca_latent/Z.npz")
-        )
-        log_png = LOG_RUN_DIR / f"pca_field_logcolor_field{int(args.field_index):03d}.png"
-        save_field_image_spectral(arr2d_log10=arr2d, out_path=log_png,
-                                mode="log", title="Reconstructed log10 resistivity")
-        print("[done] PCA field image saved:", log_png)
+    # CSV を 1 本にまとめたいので、グローバルの CSV パスは固定（ロガー側は追記・field列を出力）
+    LOG_PARAMS_PATH = BUNDLE_GPR_CSV
+    LOG_CAND_PATH   = BUNDLE_CAND_CSV
+    # 既存コードで LOG_SEQLOG_PATH を直接 npz 保存に使っていたら、以降は使わない
+    LOG_SEQLOG_PATH = None  # 使わない（まとめて最後に保存するため）
 
-        arr2d_linear = np.power(10.0, arr2d, dtype=np.float64)
-        lin_png = LOG_RUN_DIR / f"pca_field_linear_field{int(args.field_index):03d}.png"
-        save_field_image_spectral(arr2d_log10=arr2d, out_path=lin_png,
-                                mode="linear", title="Reconstructed resistivity (Ωm)")
-        print("[done] PCA field (linear 10**y) image saved:", lin_png)
+    # === 4) フィールドごとに処理（画像は最初のフィールドだけ） ===
+    for i, fid in enumerate(args.field_index):
+        fid = int(fid)
+        bundle_field_indices.append(fid)
 
-    except Exception as e:
-        print(f"[warn] PCA field image export skipped: {e}")
+        if args.check_warmup:
+            rep = run_warmup_gpr_check(
+                n_warmup=35,
+                noise_level=0.005,
+                normalize_y=True,
+                seed=args.seed,
+            )
+            print("\n=== GPR warm-up diagnostics (N=35) ===")
+            print(f"* kernel: {rep.kernel_str}")
+            print(f"* dist length_scales: {np.array2string(rep.dist_ls, precision=4)}")
+            print(f"*  pos length_scales: {np.array2string(rep.pos_ls,  precision=4)}")
+            print(f"* noise_var: {rep.noise_var:.6g}   LML: {rep.log_marginal_likelihood:.3f}")
+            print(f"* train  RMSE/MAE/R2: {rep.train_rmse:.4g} / {rep.train_mae:.4g} / {rep.train_r2:.4f}")
+            print(f"* LOOCV  RMSE/MAE/R2: {rep.loocv_rmse:.4g} / {rep.loocv_mae:.4g} / {rep.loocv_r2:.4f}")
+            print(f"* LOOCV  MLPD: {rep.loocv_mlpd:.4f}")
+            print(f"* Calibration hit rate: 68%→{100*rep.calib_hit_68:.1f}%   95%→{100*rep.calib_hit_95:.1f}%")
+            print(f"* Sigma calibration scale (LOOCV): {rep.sigma_scale:.3f}")
+            # check_warmup の時はこのフィールドだけ診断して次へ
+            continue
 
-    # 従来どおりの逐次デザイン実行
-    cfg = Config(acquisition="MI", kappa=2.0, warmup_steps=35, seed=args.seed)
-    # cfg = Config(acquisition="UCB", kappa=1.0, warmup_steps=35, seed=args.seed)
-    log = run_sequential_design(cfg, ne=32, total_steps=155)
-    np.savez_compressed(LOG_SEQLOG_PATH, **log)
-    print("[done] saved:", LOG_SEQLOG_PATH)
+        # --- 画像は最初のフィールドのみ出力 ---
+        if i == 0:
+            try:
+                arr2d = _reconstruct_field_2d_from_pca__pcaops(
+                    field_idx=fid,
+                    pca_joblib_path=PCA_JOBLIB,
+                    z_path=PCA_Z_PATH
+                )
+                log_png = LOG_RUN_DIR / f"pca_field_logcolor_field{fid:03d}.png"
+                save_field_image_spectral(arr2d_log10=arr2d, out_path=log_png,
+                                        mode="log", title=f"Reconstructed log10 resistivity (field={fid})")
+                print("[done] PCA field image saved:", log_png)
+
+                lin_png = LOG_RUN_DIR / f"pca_field_linear_field{fid:03d}.png"
+                save_field_image_spectral(arr2d_log10=arr2d, out_path=lin_png,
+                                        mode="linear", title="Reconstructed resistivity (Ωm)")
+                print("[done] PCA field (linear 10**y) image saved:", lin_png)
+            except Exception as e:
+                print(f"[warn] PCA field image export skipped (field={fid}): {e}")
+
+        # --- 逐次デザイン本体（フィールドごとに独立実行） ---
+        cfg = Config(acquisition="MI", kappa=2.0, warmup_steps=35, seed=args.seed)
+
+        # ※※重要※※
+        # ログ関数（_log_gpr_per_step / _log_candidate_stats_per_step）で
+        #   ・csv_path = LOG_PARAMS_PATH / LOG_CAND_PATH（固定ファイルへ追記）
+        #   ・append=True（追記モード）
+        #   ・field_index=fid（各行に field 列を入れる）
+        # になるよう、run_sequential_design 内の呼び出しを修正済みであることが前提です。
+        # もし run_sequential_design が受け取れるなら、引数で渡してください。
+
+        log = run_sequential_design(cfg, ne=32, total_steps=155, field_index=fid)
+
+        # --- まとめNPZ用にキーへフィールド番号を付けて格納 ---
+        # 例: log = {"ABMN": ..., "y": ..., "mu": ..., "sd": ...}
+        for k, v in log.items():
+            bundle_seqlog_items[f"{k}_field{fid:03d}"] = np.asarray(v)
+
+    # === 5) まとめNPZ保存（field_indicesを同梱して後追い可能に） ===
+    np.savez_compressed(
+        BUNDLE_SEQLOG_NPZ,
+        field_indices=np.asarray(bundle_field_indices, dtype=int),
+        **bundle_seqlog_items
+    )
+    print("[done] saved bundle npz:", BUNDLE_SEQLOG_NPZ)
+
+    # CSV は run 中に固定ファイルへ追記済み
+    print("[done] bundled CSV paths:", BUNDLE_GPR_CSV, BUNDLE_CAND_CSV)

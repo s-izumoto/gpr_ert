@@ -1,14 +1,16 @@
 
 # Minimal config to generate 32-electrode Wenner data and run an inversion image
-out: ./outputs_wenner
+out: data/processed/outputs_wenner
 
 inputs:
   pca: data/interim/pca/pca_joint.joblib
   Z:   data/interim/pca/Z.npz
 
 selection:
-  n_fields: 1
-  field_offset: 0
+  # n_fields: 1
+  # field_offset: 0
+  # fields: [0, 2]
+  field_from_seq_npz: data/processed/gpr_seq_logs/20251101_223404/seq_logs_bundle.npz
 
 geom:
   nz_full: 100

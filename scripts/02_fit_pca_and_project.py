@@ -49,7 +49,7 @@ def main():
                     help="Path to build_pca_latent.py (default: repo root)")
     args = ap.parse_args()
 
-    cfg_path = Path(ns.config)
+    cfg_path = Path(args.config)
     with cfg_path.open("r", encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
         if not isinstance(cfg, dict):
