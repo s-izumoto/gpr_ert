@@ -1,0 +1,32 @@
+# configs/eval/evaluate_inversion_vs_truth_multi.yml
+# Choose one mode by uncommenting its section.
+
+# ===== Common settings =====
+pca: data/fields/pca/pca_joint.joblib
+Z:   data/fields/pca/Z.npz
+out_dir: data/evaluation
+lambda_depth: 0.0
+plots: true
+scatter_max: 80000
+
+# ===== Mode B: bundles matched per-field (recommended) =====
+mode: bundle
+wenner_bundle: data/GPR/inversion_Wenner/inversion_bundle_Wenner.npz
+# Provide exactly one OTHER bundle (OR rename key to 'inv_npz_bundle')
+other_bundle: data/GPR/inversion_GPR/inversion_bundle_GPR.npz
+
+# Output controls
+plots: false
+write_per_cell: false
+verbose: false
+
+# Optional explicit subset of field indices to evaluate
+# fields: [0, 1, 2]
+
+# ===== Mode A: standalone NPZs (old behavior) =====
+# mode: standalone
+# inv_npz:
+#   - path/to/inversion_model1.npz
+#   - path/to/inversion_model2.npz
+# labels: ["Model-1", "Model-2"]
+# field_idx: 0

@@ -1,0 +1,41 @@
+
+# Minimal config to generate 32-electrode Wenner data and run an inversion image
+out: data/GPR/inversion_Wenner
+output:
+  invert: true
+  invert_all: true
+  inv_save_all_png: true
+  inv_npz_out: data/GPR/inversion_Wenner/inversion_bundle_Wenner
+
+inputs:
+  pca: data/fields/pca/pca_joint.joblib
+  Z:   data/fields/pca/Z.npz
+
+selection:
+  # n_fields: 1
+  # field_offset: 0
+  # fields: [0, 2]
+  field_from_seq_npz: data/GPR/sequential/GPR_bundle.npz
+
+geom:
+  nz_full: 100
+  nx_full: 400
+  n_elec: 32
+  dx_elec: 1.0
+  margin: 3.0
+  mesh_area: 0.1
+  world_Lx: 31.0
+
+design:
+  type: wenner
+  wenner_a_min: 1
+  wenner_a_max: 10
+
+forward:
+  mode: 2d
+  noise_rel: 0.02
+
+misc:
+  seed: 42
+  workers: null
+

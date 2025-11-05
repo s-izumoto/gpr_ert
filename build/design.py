@@ -1,35 +1,94 @@
-# vsoed/design/dspace.py
+"""
+ERT design space utilities
+==========================
+
+This module provides a concrete design space for 2‑D/line ERT (Electrical
+Resistivity Tomography) electrode configurations and a light‑weight embedding
++ nearest‑neighbour search API that is convenient for active design / BO loops.
+
+Core ideas
+----------
+1) **Discrete designs** are 4‑tuples ``(A, B, M, N)`` of 0‑based electrode
+   indices with constraints ``B - A >= min_gap`` and ``N - M >= min_gap``.
+   Overlap between current and potential dipoles can be disabled (default).
+
+2) **Reciprocity collapsing** keeps only one of ``(A,B,M,N)`` and
+   ``(M,N,A,B)`` by sorting the two dipoles so that the tuple with the smaller
+   dipole comes first. This reduces duplicates globally.
+
+3) **Normalized embeds** map each discrete design to a continuous 4‑vector
+   ``[dAB, dMN, mAB, mMN]`` in ``[0,1]^4`` where distances are normalized by
+   ``(n_elecs-1)`` and midpoints are in the same normalized coordinate.
+
+4) **Metric transforms** optionally rescale / decorrelate the embed space prior
+   to distance computations (``identity``, ``perdim`` z‑score, ``whiten`` via
+   covariance inverse square‑root, empirical ``cdf``, or ``cdf+whiten``). The
+   same transform is applied to queries to keep distances consistent.
+
+5) **Nearest‑k lookup** is provided either by SciPy's ``cKDTree``, scikit‑learn
+   ``KDTree``, or a simple brute‑force fallback, all over the *transformed*
+   embed space.
+
+6) **Policy helper** ``map_uv_to_embed`` converts policy samples ``u ∈ (0,1)^4``
+   to feasible continuous embeds by enforcing the geometric constraints
+   ``d ∈ [d_min, 1]`` and ``m ∈ [d/2, 1-d/2]`` per dipole, where
+   ``d_min = min_gap / (n_elecs-1)``. These continuous points can then be
+   snapped to a discrete design via ``nearest_1``/``nearest_k``.
+
+Notes
+-----
+* If ``allowed_pairs`` is provided, it is assumed to be **1‑based** indices and
+  will be converted to 0‑based internally. Invalid pairs w.r.t bounds, gaps or
+  overlap are filtered out.
+* All arrays returned by the class are ``np.float32`` where applicable.
+* This file contains **no** ERT physics — only the geometry/embedding utilities.
+
+Example
+-------
+>>> space = ERTDesignSpace(n_elecs=32, min_gap=1, allow_overlap=False, metric="cdf+whiten")
+>>> len(space)  # number of canonical designs
+...  
+>>> u = torch.rand(4)  # (0,1)^4 sample from a policy
+>>> e = map_uv_to_embed(u, n_elecs=32, min_gap=1)
+>>> idx = space.nearest_1(e.numpy())
+>>> discrete = space.pairs[idx]  # (A,B,M,N)
+
+"""
 from __future__ import annotations
 from typing import List, Sequence, Tuple
 import numpy as np
 import torch
 
-Pair = Tuple[int, int, int, int]  # (A,B,M,N)
+# Discrete design: (A, B) is the current dipole, (M, N) the potential dipole
+Pair = Tuple[int, int, int, int]
 
-# ----------------------- policy-output → embed -----------------------
+# ---------------------------------------------------------------------------
+# Policy output (0,1)^4  →  feasible continuous embed [dAB, dMN, mAB, mMN]
+# ---------------------------------------------------------------------------
 
-@torch.no_grad()  # remove this if you need grads through the mapping
+@torch.no_grad()  # Remove this decorator if gradients through the mapping are needed
 def map_uv_to_embed(u: torch.Tensor, n_elecs: int, min_gap: int = 1) -> torch.Tensor:
-    """
-    Map policy samples u in (0,1)^4 to the continuous 4D embed:
-      [dAB, dMN, mAB, mMN], where for each dipole:
-        d ∈ [d_min, 1], d_min = min_gap / (n_elecs-1)
-        m ∈ [d/2, 1 - d/2]   (midpoint must lie between electrodes)
-    This produces *feasible* continuous points that are then snapped to a
-    discrete pair via nearest_k in embed space.
+    """Map ``u ∈ (0,1)^4`` to a feasible continuous embed ``[dAB, dMN, mAB, mMN]``.
+
+    For each dipole (AB or MN):
+      - distance ``d ∈ [d_min, 1]``, where ``d_min = min_gap / (n_elecs-1)``
+      - midpoint ``m ∈ [d/2, 1 - d/2]`` so that the dipole fits within electrodes.
+
+    The result can be snapped to a discrete design using ``ERTDesignSpace.nearest_k``.
 
     Args:
-      u: (..., 4) tensor with components in (0,1)
-      n_elecs: total electrodes
-      min_gap: minimal discrete separation (A<B, B-A >= min_gap)
+        u: Tensor of shape ``(..., 4)`` with values in ``(0,1)``.
+        n_elecs: Total number of electrodes.
+        min_gap: Minimal discrete separation (``A < B`` and ``B-A >= min_gap``).
 
     Returns:
-      e: (..., 4) tensor [dAB, dMN, mAB, mMN] on same device/dtype as u
+        Tensor ``(..., 4)`` with the same dtype/device as ``u``.
     """
     assert u.shape[-1] == 4, "u must be (..., 4)"
     L = float(max(1, n_elecs - 1))
     d_min = min_gap / L
 
+    # keep a safe open interval to avoid exact 0/1 artifacts
     u = u.clamp(1e-6, 1 - 1e-6)
     u_dAB, u_dMN, u_mAB, u_mMN = torch.unbind(u, dim=-1)
 
@@ -44,25 +103,35 @@ def map_uv_to_embed(u: torch.Tensor, n_elecs: int, min_gap: int = 1) -> torch.Te
     e = torch.stack([dAB, dMN, mAB, mMN], dim=-1)
     return e
 
-# ---------------------------- design space ----------------------------
+# ---------------------------------------------------------------------------
+# Design space with canonical pair list + transformed embeds + kNN queries
+# ---------------------------------------------------------------------------
 
 class ERTDesignSpace:
-    """
-    Concrete ERT design space:
-      - Enumerates all (A,B,M,N) with B-A >= min_gap and N-M >= min_gap
-      - Optionally disallows overlap (default)
-      - Collapses reciprocity: keep one of (A,B,M,N) and (M,N,A,B)
-      - Precomputes normalized embeds: [dAB, dMN, mAB, mMN]
-      - Provides nearest_k / nearest_1 in *transformed* embed space (distance scaling)
-      - NEW: can be constructed from a pre-filtered list of allowed_pairs
+    """Enumerate valid ERT designs and provide nearest‑neighbour queries.
+
+    Features
+    --------
+    - Enumerates all ``(A,B,M,N)`` with gap constraints.
+    - Optionally disallows overlap between electrodes used by AB and MN.
+    - Collapses reciprocity globally.
+    - Precomputes normalized embeds ``[dAB, dMN, mAB, mMN]``.
+    - Applies an optional metric transform before distance computations.
+    - Exposes ``nearest_k`` / ``nearest_1`` over the transformed embed space.
+    - Can also be built from a pre‑filtered list of ``allowed_pairs``.
     """
 
-    def __init__(self, n_elecs: int, min_gap: int = 1, allow_overlap: bool = False,
-                 metric: str = "identity", allowed_pairs: list | None = None):
-
+    def __init__(
+        self,
+        n_elecs: int,
+        min_gap: int = 1,
+        allow_overlap: bool = False,
+        metric: str = "identity",
+        allowed_pairs: list | None = None,
+    ) -> None:
         self.n_elecs = int(n_elecs)
         self.min_gap = int(min_gap)
-        self.metric  = str(metric).lower()
+        self.metric = str(metric).lower()
 
         # --- enumerate valid discrete pairs or use provided allowed_pairs ---
         if allowed_pairs is None:
@@ -72,26 +141,33 @@ class ERTDesignSpace:
                     for M in range(n_elecs):
                         for N in range(M + min_gap, n_elecs):
                             if not allow_overlap and len({A, B, M, N}) < 4:
+                                # skip if any electrode is reused across AB and MN
                                 continue
                             pairs.append((A, B, M, N))
         else:
-            # Assume incoming allowed pairs are 1-based; convert to 0-based internal
+            # Assume incoming allowed pairs are 1‑based; convert to 0‑based
             pairs = []
-            for (A,B,M,N) in allowed_pairs:
-                A0,B0,M0,N0 = A-1, B-1, M-1, N-1
-                if not allow_overlap and len({A0,B0,M0,N0}) < 4:
+            for (A, B, M, N) in allowed_pairs:
+                A0, B0, M0, N0 = A - 1, B - 1, M - 1, N - 1
+                if not allow_overlap and len({A0, B0, M0, N0}) < 4:
                     continue
-                if not (0 <= A0 < n_elecs and 0 <= B0 < n_elecs and 0 <= M0 < n_elecs and 0 <= N0 < n_elecs):
+                if not (
+                    0 <= A0 < n_elecs
+                    and 0 <= B0 < n_elecs
+                    and 0 <= M0 < n_elecs
+                    and 0 <= N0 < n_elecs
+                ):
                     continue
                 if B0 - A0 < min_gap or N0 - M0 < min_gap:
                     continue
-                pairs.append((A0,B0,M0,N0))
+                pairs.append((A0, B0, M0, N0))
 
         # --- collapse reciprocity globally: keep one canonical orientation ---
         pairs_canon: List[Pair] = []
         seen = set()
         for (A, B, M, N) in pairs:
-            dip1 = (A, B); dip2 = (M, N)
+            dip1 = (A, B)
+            dip2 = (M, N)
             if dip2 < dip1:
                 dip1, dip2 = dip2, dip1
             key = (dip1[0], dip1[1], dip2[0], dip2[1])
@@ -105,15 +181,18 @@ class ERTDesignSpace:
         self.embed_dim = 4
 
         # --- base embeds [P,4] ---
-        self.embeds = np.stack([self._pair_to_embed(p) for p in self.pairs], axis=0).astype(np.float32)
+        self.embeds = (
+            np.stack([self._pair_to_embed(p) for p in self.pairs], axis=0).astype(np.float32)
+        )
 
         # --- prepare metric transform & transformed embeds ---
         self._prepare_metric_transform()
         self._rebuild_kdt()
 
+    # ---------------------- basic conversions / aliases ---------------------
 
     def _pair_to_embed(self, p: Pair) -> np.ndarray:
-        """(A,B,M,N) → normalized [dAB, dMN, mAB, mMN] in [0,1]."""
+        """Convert ``(A,B,M,N)`` → normalized ``[dAB, dMN, mAB, mMN]`` in ``[0,1]``."""
         A, B, M, N = p
         L = float(self.n_elecs - 1)
         dAB = (B - A) / L
@@ -123,20 +202,25 @@ class ERTDesignSpace:
         return np.array([dAB, dMN, mAB, mMN], dtype=np.float32)
 
     def dnorm_from_pair(self, p: Pair) -> np.ndarray:
-        """Public alias used elsewhere in your code."""
+        """Public alias used elsewhere in codebases to get the normalized embed."""
         return self._pair_to_embed(p)
 
-    # ---- k-NN API used by train/design_select.py ----
+    # --------------------------- k‑NN search API ----------------------------
 
     def nearest_k(self, e, k: int) -> np.ndarray:
+        """Return indices of the ``k`` nearest discrete designs to ``e``.
+
+        Args:
+            e: Query embed of shape ``(4,)`` or ``(1,4)`` (array‑like).
+            k: Number of neighbours to return (capped by the number of designs).
+
+        Returns:
+            ``np.ndarray`` of shape ``(k,)`` with indices into ``self.pairs``.
         """
-        Return indices of the k nearest discrete designs to the given 4D embed.
-        e: array-like shape (4,) or (1,4)
-        """
-        e_t = self._transform_query(e)  # ★ 変換
+        e_t = self._transform_query(e)  # transformed query
         k = min(int(k), len(self.pairs))
         if self._kdt is None or self._use == "brute":
-            diffs = self.t_embeds - e_t  # ★ 変換後の埋め込みで距離
+            diffs = self.t_embeds - e_t  # distances in transformed space
             d2 = (diffs * diffs).sum(axis=1)
             return np.argsort(d2)[:k]
         if self._use == "scipy":
@@ -146,48 +230,55 @@ class ERTDesignSpace:
             idx = self._kdt.query(e_t, k=k, return_distance=False)
             return np.asarray(idx).reshape(-1)
 
-
     def nearest_1(self, e) -> int:
+        """Return the index of the single nearest design to ``e``."""
         idxs = self.nearest_k(e, 1)
         return int(np.asarray(idxs).reshape(()))
 
-    # (optional) convenience
-    def __len__(self) -> int:
+    def __len__(self) -> int:  # convenience
         return len(self.pairs)
-    
-    def _prepare_metric_transform(self):
-        """Set up transform for the chosen metric and produce transformed embeds."""
+
+    # ------------------------ metric / query transforms ---------------------
+
+    def _prepare_metric_transform(self) -> None:
+        """Set up the transform for the chosen metric and transform ``self.embeds``.
+
+        Produces ``self.t_embeds`` (transformed embeds) and stores any parameters
+        needed to transform individual queries later in ``self._metric_info``.
+        """
         E = self.embeds.copy()  # [P,4]
         eps = 1e-8
 
-        def _perdim(E):
-            mu = E.mean(axis=0, keepdims=True)
-            sd = E.std(axis=0, keepdims=True)
+        def _perdim(E_: np.ndarray):
+            mu = E_.mean(axis=0, keepdims=True)
+            sd = E_.std(axis=0, keepdims=True)
             sd = np.where(sd < eps, 1.0, sd)
-            return (E - mu) / sd, (mu, sd)
+            return (E_ - mu) / sd, (mu, sd)
 
-        def _whiten(E):
-            mu = E.mean(axis=0, keepdims=True)
-            X = E - mu
+        def _whiten(E_: np.ndarray):
+            mu = E_.mean(axis=0, keepdims=True)
+            X = E_ - mu
             # Cov = U S U^T ⇒ Cov^{-1/2} = U S^{-1/2} U^T
             Cov = (X.T @ X) / max(1, X.shape[0] - 1)
-            U, S, Vt = np.linalg.svd(Cov + eps * np.eye(Cov.shape[0], dtype=Cov.dtype), full_matrices=False)
-            S_inv_sqrt = np.diag(1.0 / np.sqrt(S + eps)).astype(E.dtype)
-            W = (U @ S_inv_sqrt @ U.T).astype(E.dtype)  # [4,4]
+            U, S, _ = np.linalg.svd(
+                Cov + eps * np.eye(Cov.shape[0], dtype=Cov.dtype), full_matrices=False
+            )
+            S_inv_sqrt = np.diag(1.0 / np.sqrt(S + eps)).astype(E_.dtype)
+            W = (U @ S_inv_sqrt @ U.T).astype(E_.dtype)  # [4,4]
             return (X @ W), (mu, W)
 
-        def _cdf(E):
-            # per-dim ECDF to [0,1]
-            Z = np.empty_like(E)
-            P = E.shape[0]
-            for j in range(E.shape[1]):
-                x = E[:, j]
+        def _cdf(E_: np.ndarray):
+            # Per‑dimension empirical CDF mapping to (0,1), avoiding exact 0/1.
+            Z = np.empty_like(E_)
+            P = E_.shape[0]
+            for j in range(E_.shape[1]):
+                x = E_[:, j]
                 order = np.argsort(x)
                 ranks = np.empty_like(order)
                 ranks[order] = np.arange(P)
-                # rank in (0,1): (r+0.5)/P → avoid exact 0/1
+                # rank in (0,1): (r+0.5)/P to avoid hard 0/1
                 z = (ranks + 0.5) / float(P)
-                Z[:, j] = z.astype(E.dtype)
+                Z[:, j] = z.astype(E_.dtype)
             return Z, None
 
         if self.metric == "identity":
@@ -214,7 +305,13 @@ class ERTDesignSpace:
             raise ValueError(f"unknown metric: {self.metric}")
 
     def _transform_query(self, e):
-        """Apply the same transform to a single query embed e[4,]."""
+        """Apply the stored metric transform to a single query ``e`` (shape ``[4]``).
+
+        For ``cdf`` and ``cdf+whiten`` we approximate the query's empirical CDF
+        position by inserting ``e`` into the sorted column values of
+        ``self.embeds`` (no re‑fitting). This keeps queries and the stored
+        distribution consistent without re‑estimating CDF parameters per query.
+        """
         e = np.asarray(e, np.float32).reshape(1, -1)
         kind = "identity" if self._metric_info is None else self._metric_info[0]
         eps = 1e-8
@@ -228,17 +325,15 @@ class ERTDesignSpace:
             mu, W = self._metric_info[1]
             return (e - mu) @ W
         if kind == "cdf":
-            # query単体でのECDFは本来定義が難しいので、近似として
-            # 各次元で線形補間：x を E の分位にマッピング（最近傍2点の rank 比）
-            # 安価な近似として、学習時の分布が概ね単調なら次で十分
-            E = self.embeds  # original
+            # Approximate the empirical CDF coordinate of e using the stored E.
+            E = self.embeds  # original (untransformed)
             Z = np.empty_like(e)
             for j in range(E.shape[1]):
                 xj = e[0, j]
                 col = E[:, j]
                 order = np.argsort(col)
                 col_sorted = col[order]
-                # 挿入位置
+                # insertion position
                 k = np.searchsorted(col_sorted, xj, side="left")
                 P = col_sorted.shape[0]
                 if k <= 0:
@@ -254,11 +349,10 @@ class ERTDesignSpace:
                 Z[0, j] = zj
             return Z.astype(np.float32)
         if kind == "cdf+whiten":
-            # まず CDF 近似を「この場で」明示的に適用（再帰しない）
-            E = self.embeds  # 元の埋め込み [P,4]
-            Zq = np.empty_like(e)  # e は [1,4]
+            # First map to CDF coordinates as above, then apply the learned W.
+            E = self.embeds  # original embeds [P,4]
+            Zq = np.empty_like(e)  # e is [1,4]
             P = E.shape[0]
-            eps = 1e-8
 
             for j in range(E.shape[1]):
                 xj = float(e[0, j])
@@ -279,25 +373,35 @@ class ERTDesignSpace:
                     zj = (1 - t) * r0 + t * r1
                 Zq[0, j] = zj
 
-            # 次に、CDF 後の空間で Whiten（_prepare_metric_transform で学習済みの μ と W を使用）
+            # Apply the whitening matrix learned during _prepare_metric_transform
             mu, W = self._metric_info[1]  # ("cdf+whiten", (mu, W))
             return (Zq - mu) @ W
 
+        # If we reached here, the metric kind is unknown (defensive programming)
+        raise RuntimeError(f"unhandled metric kind: {kind}")
 
-    def _rebuild_kdt(self):
-        """Rebuild KD-tree on transformed embeds."""
+    # ------------------------------- k‑d tree -------------------------------
+
+    def _rebuild_kdt(self) -> None:
+        """Rebuild the KD‑tree on ``self.t_embeds``.
+
+        Uses SciPy's ``cKDTree`` if available, otherwise scikit‑learn's
+        ``KDTree``. Falls back to a brute‑force numpy path if neither is
+        available. The chosen backend is recorded in ``self._use``.
+        """
         self._kdt = None
         self._use = "brute"
         try:
             from scipy.spatial import cKDTree  # type: ignore
+
             self._kdt = cKDTree(self.t_embeds)
             self._use = "scipy"
         except Exception:
             try:
                 from sklearn.neighbors import KDTree  # type: ignore
+
                 self._kdt = KDTree(self.t_embeds)
                 self._use = "sklearn"
             except Exception:
                 self._kdt = None
                 self._use = "brute"
-

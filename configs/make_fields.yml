@@ -1,0 +1,17 @@
+# Where to write dataset.npz, label_map.json, meta.json (+ previews/ if enabled)
+out: data/fields/
+
+# Grid size
+nz: 100
+nx: 400
+
+# Samples per class (pure cases; no mixing)
+per_class: 1000
+
+# Preview PNGs
+save_png: true
+previews_per_class: 4
+dpi: 140
+
+# Reproducibility
+seed: 0
