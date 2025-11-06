@@ -16,6 +16,27 @@ It covers all stages from generating heterogeneous resistivity fields to inversi
 - Notably, in the **deeper half of the domain**, the improvements are more pronounced, with **Pearson r** increasing by **18 %**, **Spearman ρ** by **16 %**, and **RMSE** decreasing by **9 %**.
 - In the **shallow half**, all metrics also show moderate improvements of a few percent, and **no degradation was observed** in any of the evaluation criteria.
 
+## 🛠️ Installation
+
+This repository provides an `environment.yml` file to reproduce the full software environment.
+
+### Quick start (recommended)
+```bash
+# 0) (Optional) Install Mambaforge or Miniconda
+#    https://conda-forge.org/miniforge/
+
+# 1) Create the environment (public name, no user-specific paths)
+mamba env create -n gpr-ert -f environment.yml    # if you have mamba
+# OR
+conda env create -n gpr-ert -f environment.yml
+
+# 2) Activate it
+conda activate gpr-ert
+
+# 3) Verify
+python -V
+pip -V
+```
 
 ---
 

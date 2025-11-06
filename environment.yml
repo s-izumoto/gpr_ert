@@ -1,4 +1,3 @@
-name: C:\Users\izumoto\github\gpr_ert\.conda
 channels:
 - conda-forge
 - defaults
@@ -108,4 +107,4 @@ dependencies:
   - widgetsnbextension==4.0.14
   - wslink==2.4.0
   - yarl==1.22.0
-prefix: C:\Users\izumoto\github\gpr_ert\.conda
+name: gpr-ert

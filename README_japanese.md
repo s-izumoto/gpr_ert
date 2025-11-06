@@ -14,6 +14,28 @@
 - 特に **領域の下半分（深部）** において改善が顕著で、**Pearson r** は **18% 向上**、**Spearman ρ** は **16% 向上**、**RMSE** は **9% 低下** しました。  
 - **表層半分** においてもすべての指標で数パーセントの改善が見られ、**悪化した指標はありません** でした。
 
+## 🛠️ インストール
+
+このリポジトリには、環境を再現するための `environment.yml` が同梱されています。
+
+### クイックスタート（推奨）
+```bash
+# 0) （任意）Mambaforge または Miniconda をインストール
+#    https://conda-forge.org/miniforge/
+
+# 1) 公開用の名前で環境を作成（ユーザー固有パスを使用しない）
+mamba env create -n gpr-ert -f environment.yml    # mamba がある場合
+# または
+conda env create -n gpr-ert -f environment.yml
+
+# 2) 有効化
+conda activate gpr-ert
+
+# 3) バージョン確認
+python -V
+pip -V
+```
+
 ---
 ## 🧭 プロジェクト構造
 
