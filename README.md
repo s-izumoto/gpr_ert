@@ -9,7 +9,7 @@ It covers all stages from generating heterogeneous resistivity fields to inversi
 # GPR-Based Sequential Design: Performance Summary
 
 **Compared to the array–based baseline**, the GPR-based sequential design — using a **Mutual Information–based acquisition function** — shows consistent performance gains in overall metrics. Example comparison images can be found in the `images_example/` folder.
-- **Morphological IoU** improves by approximately **8 %**,  
+- **IoU after Otsu thresholding and morphological filtering** improves by approximately **8 %**,  
 - **RMSE** by **6 %**,  
 - **Pearson r** and **Spearman ρ** by **4 %**, and  
 - **Jensen–Shannon divergence (JSD)** by **2 %** on average.  
