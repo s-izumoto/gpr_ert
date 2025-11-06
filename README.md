@@ -4,7 +4,18 @@
 # GPR–ERT Sequential Design and Evaluation Pipeline
 
 This repository implements a full workflow for **synthetic Electrical Resistivity Tomography (ERT)** and **Gaussian Process Regression (GPR)**–based **sequential experimental design**.  
-It covers all stages from generating heterogeneous resistivity fields to inversion and quantitative evaluation against a Wenner baseline.
+It covers all stages from generating heterogeneous resistivity fields to inversion and quantitative evaluation against a Wenner array–based baseline.
+
+# GPR-Based Sequential Design: Performance Summary
+
+**Compared to the array–based baseline**, the GPR-based sequential design — using a **Mutual Information–based acquisition function** — shows consistent performance gains in overall metrics:  
+- **Morphological IoU** improves by approximately **8 %**,  
+- **RMSE** by **6 %**,  
+- **Pearson r** and **Spearman ρ** by **4 %**, and  
+- **Jensen–Shannon divergence (JSD)** by **2 %** on average.  
+- Notably, in the **deeper half of the domain**, the improvements are more pronounced, with **Pearson r** increasing by **18 %**, **Spearman ρ** by **16 %**, and **RMSE** decreasing by **9 %**.
+- In the **shallow half**, all metrics also show moderate improvements of a few percent, and **no degradation was observed** in any of the evaluation criteria.
+
 
 ---
 
@@ -26,7 +37,7 @@ gpr_ert/
 │   ├── gpr_seq_core.py          # Core Gaussian Process Regression (GPR) implementation
 │   ├── sequential_GPR.py        # Sequential design driver wrapping gpr_seq_core
 │   ├── invert_GPR.py            # Batch inversion of GPR-selected measurements
-│   ├── forward_invert_Wenner.py # Forward and inversion workflow for Wenner baseline
+│   ├── forward_invert_Wenner.py # Forward and inversion workflow for Wenner array-based baseline
 │   └── evaluate_GPR_vs_Wenner.py# Comparison metrics and evaluation functions
 │
 ├── scripts/                     # Thin CLI wrappers calling corresponding build modules
@@ -39,17 +50,18 @@ gpr_ert/
 │   ├── 07_invert_GPR.py
 │   ├── 08_forward_invert_Wenner.py
 │   ├── 09_evaluate_GPR_vs_Wenner.py
-│   └── 10_plot_summary.py
+│   ├── 10_plot_summary.py
+|   └── XX_make_images.py
 │
 ├── configs/                     # YAML configuration files for reproducible experiments
 │   ├── make_fields.yml          # Parameters for synthetic field generation (domain size, randomness)
 │   ├── fit_pca.yml              # PCA configuration (n_components, explained variance)
 │   ├── cluster_pca.yml          # Clustering parameters (n_clusters, algorithm, sampling mode)
-│   ├── measurements_warmup.yml  # Wenner warm-up forward modeling parameters
+│   ├── measurements_warmup.yml  # Wenner array warm-up forward modeling parameters
 │   ├── measurements_post_warmup.yml # Multi-array forward modeling setup
 │   ├── sequential_GPR.yml       # GPR sequential design setup (kernel, acquisition, warmup length)
 │   ├── invert_GPR.yml           # Inversion setup for sequential GPR outputs
-│   ├── forward_invert_Wenner.yml# Wenner baseline forward/inverse modeling setup
+│   ├── forward_invert_Wenner.yml# Wenner array-based baseline forward/inverse modeling setup
 │   └── evaluate_GPR_vs_Wenner.yml # Evaluation and metric comparison settings
 │
 ├── README.md                    # Main documentation (project overview and workflow)
@@ -80,8 +92,8 @@ Each step consumes the previous output and produces the next stage’s input.
 | **05** | `05_measurements_post_warmup.py` | Extend the dataset with candidate measurements from multiple array types (Schlumberger, Dipole-Dipole, Gradient, etc.). |
 | **06** | `06_sequential_GPR.py` | Apply **Gaussian Process Regression (GPR)** after the warm-up period. The GPR is first fitted on the warm-up data, then iteratively selects new measurements using acquisition functions (UCB, LCB, EI, MI, MAXVAR). |
 | **07** | `07_invert_GPR.py` | Invert the data obtained through the sequential GPR process to reconstruct the subsurface resistivity distribution. |
-| **08** | `08_forward_invert_Wenner.py` | Perform forward modeling and inversion using the Wenner baseline configuration for reference. |
-| **09** | `09_evaluate_GPR_vs_Wenner.py` | Quantitatively evaluate the inversion results from GPR-based and Wenner-based measurements using error and spatial similarity metrics. |
+| **08** | `08_forward_invert_Wenner.py` | Perform forward modeling and inversion using the Wenner array-based baseline configuration for reference. |
+| **09** | `09_evaluate_GPR_vs_Wenner.py` | Quantitatively evaluate the inversion results from GPR-based and Wenner array-based measurements using error and spatial similarity metrics. |
 | **10** | `10_plot_summary.py` | Summarize and visualize evaluation metrics (boxplots, relative improvements, subset analysis). |
 
 ---
@@ -187,14 +199,14 @@ The workflow spans from **synthetic field generation** to **inversion, evaluatio
    python scripts/07_invert_GPR.py --config configs/invert_GPR.yml
    ```
 
-8. **Forward and inverse modeling with the Wenner baseline**  
-   Run the same modeling and inversion pipeline using the Wenner configuration to establish a reference baseline.  
+8. **Forward and inverse modeling with the Wenner array-based baseline**  
+   Run the same modeling and inversion pipeline using the Wenner array to establish a reference baseline.  
    ```bash
    python scripts/08_forward_invert_Wenner.py --config configs/forward_invert_Wenner.yml
    ```
 
 9. **Quantitative evaluation of GPR vs. Wenner results**  
-   Compare inversion results from the GPR-based sequential design and the Wenner baseline using statistical and spatial similarity metrics.  
+   Compare inversion results from the GPR-based sequential design and the Wenner array-based baseline using statistical and spatial similarity metrics.  
    ```bash
    python scripts/09_evaluate_GPR_vs_Wenner.py --config configs/evaluate_GPR_vs_Wenner.yml
    ```

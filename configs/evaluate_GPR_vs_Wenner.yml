@@ -20,6 +20,9 @@ plots: false
 write_per_cell: false
 verbose: false
 
+morph:
+  shared_threshold: true_otsu   # or: both_otsu / true_q50
+  radius: 3                     # 0 disables morphology; 3–5 is a good start
 # Optional explicit subset of field indices to evaluate
 # fields: [0, 1, 2]
 

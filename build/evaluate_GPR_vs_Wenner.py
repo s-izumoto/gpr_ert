@@ -76,6 +76,7 @@ from pathlib import Path
 import csv, json, re
 import numpy as np
 from skimage.filters import threshold_otsu
+from skimage.morphology import disk, closing
 
 
 def _js_divergence_hist(true_map: np.ndarray, pred_map: np.ndarray, bins: int = 64) -> float:
@@ -124,22 +125,6 @@ def _js_divergence_hist(true_map: np.ndarray, pred_map: np.ndarray, bins: int = 
 
 
 # ================= PCA reconstruction =================
-
-def _reconstruct_field_2d_from_pca_local(field_idx: int, pca_joblib_path: Path, z_path: Path) -> np.ndarray:
-    """(Legacy) Reconstruct a 2D log10-ρ field from PCA meta and Z coefficients.
-
-    This variant expects the PCA joblib to expose keys: mean, components, nz, nx.
-    """
-    from joblib import load as joblib_load
-    meta = joblib_load(pca_joblib_path)
-    mean = np.asarray(meta["mean"], dtype=np.float32)
-    comps = np.asarray(meta["components"], dtype=np.float32)
-    nz, nx = int(meta["nz"]), int(meta["nx"])
-    Z = np.load(z_path, allow_pickle=True)["Z"]
-    z = Z[field_idx, :comps.shape[0]].astype(np.float32)
-    x_flat = (z @ comps + mean).astype(np.float32)
-    return x_flat.reshape(nz, nx)
-
 
 def _reconstruct_field_2d_from_pca__pcaops(field_idx: int, pca_joblib_path: "Path", z_path: "Path") -> np.ndarray:
     """Reconstruct a 2D log10-ρ field from PCA components and per-field coefficients.
@@ -428,30 +413,126 @@ def _compute_metrics(inv_rho_cells: np.ndarray, cell_centers: np.ndarray,
 
 
 def fourier_spectrum_correlation(true_map: np.ndarray, pred_map: np.ndarray) -> float:
-    """Correlation between the magnitude spectra of the 2D Fourier transforms.
-
-    Steps: nan→0, FFT2 → magnitude → fftshift → flatten → Pearson correlation.
     """
-    t = np.nan_to_num(true_map)
-    p = np.nan_to_num(pred_map)
+    Compute correlation between the magnitude spectra of 2D Fourier transforms
+    of two input maps. This version is more robust against DC bias, boundary
+    artifacts, and NaN values.
+
+    Steps:
+        1. Replace NaN by the median of valid values.
+        2. Apply a 2D Hanning window to reduce edge discontinuities.
+        3. Perform 2D FFT and shift the zero-frequency component to the center.
+        4. Remove DC component to avoid dominance by low frequencies.
+        5. Optionally take log(1 + amplitude) to compress dynamic range.
+        6. Compute Pearson correlation between the flattened spectra.
+    """
+    import numpy as np
+
+    # Ensure float arrays
+    t = np.array(true_map, dtype=float, copy=True)
+    p = np.array(pred_map, dtype=float, copy=True)
+
+    # Handle NaN: replace with median of valid region
+    valid_t = np.isfinite(t)
+    valid_p = np.isfinite(p)
+    if np.any(valid_t):
+        t[~valid_t] = np.nanmedian(t[valid_t])
+    else:
+        t[:] = 0
+    if np.any(valid_p):
+        p[~valid_p] = np.nanmedian(p[valid_p])
+    else:
+        p[:] = 0
+
+    # Apply a 2D Hanning window to reduce spectral leakage
+    wy = np.hanning(t.shape[0])
+    wx = np.hanning(t.shape[1])
+    window = wy[:, None] * wx[None, :]
+    t *= window
+    p *= window
+
+    # 2D FFT and magnitude spectra
     ft_true = np.abs(np.fft.fftshift(np.fft.fft2(t)))
     ft_pred = np.abs(np.fft.fftshift(np.fft.fft2(p)))
-    return float(np.corrcoef(ft_true.flatten(), ft_pred.flatten())[0, 1])
 
+    # Remove DC (center) component to avoid bias from zero frequency
+    cy, cx = np.array(ft_true.shape) // 2
+    ft_true[cy, cx] = 0.0
+    ft_pred[cy, cx] = 0.0
+
+    # Use logarithmic amplitude to compress the dynamic range
+    ft_true = np.log1p(ft_true)
+    ft_pred = np.log1p(ft_pred)
+
+    # Flatten and compute Pearson correlation
+    return float(np.corrcoef(ft_true.ravel(), ft_pred.ravel())[0, 1])
 
 def morphological_iou(true_map: np.ndarray, pred_map: np.ndarray) -> float:
-    """Intersection-over-Union of binarized maps (Otsu thresholds on normalized images)."""
-    t = np.nan_to_num(true_map)
-    p = np.nan_to_num(pred_map)
-    # Normalize to [0,1] to make Otsu robust across ranges
-    t = (t - t.min()) / (t.max() - t.min() + 1e-9)
-    p = (p - p.min()) / (p.max() - p.min() + 1e-9)
-    t_bin = t > threshold_otsu(t)
-    p_bin = p > threshold_otsu(p)
-    intersection = np.logical_and(t_bin, p_bin).sum()
-    union = np.logical_or(t_bin, p_bin).sum()
-    return float(intersection / (union + 1e-9))
+    """
+    Morphological IoU with shared thresholding and optional closing (2D-safe).
 
+    - Keep arrays 2D; compute stats (min/max/threshold) on the common-valid mask
+    - Normalize to [0, 1] using valid-only min/max, but apply transform to full 2D
+    - Threshold both maps with a shared policy; fill invalids with False
+    - Optional morphological closing (disk(radius)) on 2D binaries
+    """
+    shared_threshold = globals().get("_MORPH_SHARED_THRESHOLD", "true_otsu")
+    radius = int(globals().get("_MORPH_RADIUS", 0))
+
+    # 2D common-valid mask
+    valid = np.isfinite(true_map) & np.isfinite(pred_map)
+    if not np.any(valid):
+        return float("nan")
+
+    # Copy to float 2D
+    t2 = np.array(true_map, dtype=float, copy=True)
+    p2 = np.array(pred_map, dtype=float, copy=True)
+
+    # Normalize to [0,1] using min/max computed on valid pixels
+    def norm01_2d(a: np.ndarray, valid_mask: np.ndarray):
+        vals = a[valid_mask]
+        amin = np.nanmin(vals); amax = np.nanmax(vals)
+        if not np.isfinite(amin) or not np.isfinite(amax) or amax <= amin:
+            return None
+        out = (a - amin) / (amax - amin)
+        return out
+
+    t_norm = norm01_2d(t2, valid)
+    p_norm = norm01_2d(p2, valid)
+    if t_norm is None or p_norm is None:
+        return float("nan")
+
+    # Shared threshold selection (compute threshold on valid region of t_norm)
+    if shared_threshold == "true_otsu":
+        thr = float(threshold_otsu(t_norm[valid]))
+        t_bin = t_norm > thr
+        p_bin = p_norm > thr
+    elif shared_threshold == "true_q50":
+        thr = float(np.nanquantile(t_norm[valid], 0.5))
+        t_bin = t_norm > thr
+        p_bin = p_norm > thr
+    else:  # "both_otsu" — compute each threshold on its own valid region
+        t_thr = float(threshold_otsu(t_norm[valid]))
+        p_thr = float(threshold_otsu(p_norm[valid]))
+        t_bin = t_norm > t_thr
+        p_bin = p_norm > p_thr
+
+    # Invalidate outside the common mask so morphology/IoU ignores them
+    t_bin = np.where(valid, t_bin, False)
+    p_bin = np.where(valid, p_bin, False)
+
+    # Optional morphological closing (2D structuring element)
+    if radius > 0:
+        se = disk(radius)
+        t_bin = closing(t_bin, se)
+        p_bin = closing(p_bin, se)
+
+    # IoU over the common-valid domain
+    inter = np.logical_and(t_bin, p_bin)[valid].sum()
+    union = np.logical_or(t_bin, p_bin)[valid].sum()
+    if union == 0:
+        return float("nan")
+    return float(inter / union)
 
 # ================= bundled helpers =================
 FIELD_PAT = re.compile(r"^inv_rho_cells__(field\d{1,4})$")
@@ -501,19 +582,31 @@ def _eval_all_subsets(inv_rho_cells: np.ndarray, cell_centers: np.ndarray,
                       L_world: float, Lz: float, xmin: float, zmax: float, true_log2d: np.ndarray,
                       lambda_depth: float, base_label: str, make_plots: bool,
                       scatter_max: int, out_dir: Path, write_per_cell: bool) -> list[dict]:
-    """Run evaluation for three subsets: ALL, bottom25%, and top25% (by true log10-ρ).
-
-    Returns
-    -------
-    list of dict
-        Metrics dicts with an added 'subset' key.
+    """Run evaluation for multiple subsets:
+       - all
+       - bottom25% / top25% by true log10-ρ
+       - shallow50% / deep50% by physical depth from the top boundary (zmax)
     """
-    # Precompute true log10 on cells to form masks
+    # Precompute true log10 on cells (for bottom/top quartiles)
     true_log_cells_all = sample_logR_to_cells(true_log2d, cell_centers, L_world, Lz, xmin, zmax)
     q25 = float(np.quantile(true_log_cells_all, 0.25))
     q75 = float(np.quantile(true_log_cells_all, 0.75))
     m_bottom = true_log_cells_all <= q25
     m_top    = true_log_cells_all >= q75
+
+    # Depth from the top: depth = zmax - cz  (top ~ 0, bottom ~ Lz)
+    cz = cell_centers[:, 1].astype(float)
+    depth = (float(zmax) - cz)
+    # Robustness: ignore NaNs/inf when computing the halfway threshold
+    valid_depth = np.isfinite(depth)
+    if not np.any(valid_depth):
+        # Fallback to unweighted split if geometry is degenerate
+        halfway = float(Lz) / 2.0
+    else:
+        # Use geometric half by domain: Lz/2 is the intended split
+        halfway = float(Lz) / 2.0
+    m_shallow = depth <= halfway
+    m_deep    = depth >  halfway
 
     out: list[dict] = []
 
@@ -538,6 +631,20 @@ def _eval_all_subsets(inv_rho_cells: np.ndarray, cell_centers: np.ndarray,
     m_t["subset"] = "top25"
     out.append(m_t)
 
+    # shallow50
+    m_sh = _compute_metrics(inv_rho_cells, cell_centers, L_world, Lz, xmin, zmax, true_log2d,
+                            lambda_depth, f"{base_label}__shallow50", make_plots, scatter_max, out_dir,
+                            write_per_cell=write_per_cell, mask=m_shallow)
+    m_sh["subset"] = "shallow50"
+    out.append(m_sh)
+
+    # deep50
+    m_dp = _compute_metrics(inv_rho_cells, cell_centers, L_world, Lz, xmin, zmax, true_log2d,
+                            lambda_depth, f"{base_label}__deep50", make_plots, scatter_max, out_dir,
+                            write_per_cell=write_per_cell, mask=m_deep)
+    m_dp["subset"] = "deep50"
+    out.append(m_dp)
+
     return out
 
 
@@ -557,6 +664,13 @@ def run_from_cfg(cfg: dict) -> dict:
     make_plots    = bool(cfg.get("plots", False))           # default False
     write_per_cell = bool(cfg.get("write_per_cell", False)) # default False
     verbose       = bool(cfg.get("verbose", False))         # default False
+    morph_cfg = cfg.get("morph", {}) if isinstance(cfg.get("morph", {}), dict) else {}
+    globals()["_MORPH_SHARED_THRESHOLD"] = str(morph_cfg.get("shared_threshold", "true_otsu")).lower()
+    globals()["_MORPH_RADIUS"] = int(morph_cfg.get("radius", 0))
+
+    if verbose:
+        print(f"[morph] shared_threshold={globals().get('_MORPH_SHARED_THRESHOLD')}, "
+              f"radius={globals().get('_MORPH_RADIUS')}")
 
     scatter_max = int(cfg.get("scatter_max", 80000))
 
