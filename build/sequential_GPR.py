@@ -544,6 +544,8 @@ def run_from_cfg(cfg: GPRSeqConfig, *, field_index: int = 0) -> Path:
         min_gap=cfg.min_gap,
         metric="cdf+whiten",
         allowed_pairs=allowed_pairs,
+        debug_whiten=True,
+        feature_names=["dAB","dMN","mAB","mMN"],
     )
 
     def _to_one_based_if_needed(p, n):

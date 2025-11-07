@@ -128,6 +128,8 @@ class ERTDesignSpace:
         allow_overlap: bool = False,
         metric: str = "identity",
         allowed_pairs: list | None = None,
+        debug_whiten: bool = False,
+        feature_names: list[str] | None = None
     ) -> None:
         self.n_elecs = int(n_elecs)
         self.min_gap = int(min_gap)
@@ -185,6 +187,8 @@ class ERTDesignSpace:
             np.stack([self._pair_to_embed(p) for p in self.pairs], axis=0).astype(np.float32)
         )
 
+        self._debug_whiten = bool(debug_whiten)
+        self._feature_names = feature_names or ["dAB","dMN","mAB","mMN"]
         # --- prepare metric transform & transformed embeds ---
         self._prepare_metric_transform()
         self._rebuild_kdt()
@@ -303,6 +307,54 @@ class ERTDesignSpace:
             self.t_embeds = Z2.astype(np.float32)
         else:
             raise ValueError(f"unknown metric: {self.metric}")
+        
+        # ================= DEBUG PRINTS (whiten/perdim) =================
+        if getattr(self, "_debug_whiten", False):
+            kind = "identity" if self._metric_info is None else self._metric_info[0]
+            names = getattr(self, "_feature_names", ["f0","f1","f2","f3"])
+
+            print(f"\n[whiten/debug] metric = {kind}")
+            if kind == "perdim":
+                mu, sd = self._metric_info[1]
+                mu = mu.reshape(-1); sd = sd.reshape(-1)
+                print("[whiten/debug] per-dimension stats BEFORE standardization:")
+                for n, m, s in zip(names, mu, sd):
+                    print(f"  {n}: mu={m:.6g}, sigma={s:.6g}")
+                print("\n[whiten/debug] Axis construction (z-score; no rotation):")
+                for n, m, s in zip(names, mu, sd):
+                    print(f"  {n}' = ({n} - {m:.6g}) / {s:.6g}")
+
+            elif kind in ("whiten", "cdf+whiten"):
+                mu, W = self._metric_info[1]
+                mu = mu.reshape(-1)
+                print("[whiten/debug] mean (mu) of the space where whitening is applied:")
+                for n, m in zip(names, mu):
+                    print(f"  {n}: {m:.6g}")
+
+                # Whitening matrix (new = (x - mu) @ W)
+                print("\n[whiten/debug] whitening matrix W (shape {}):".format(W.shape))
+                with np.printoptions(precision=4, suppress=True):
+                    print(W)
+
+                # Show each new axis as a linear combination of original axes
+                print("\n[whiten/debug] Axis mapping (new_k = Σ c_j · original_j):")
+                for k in range(W.shape[1]):
+                    coeffs = W[:, k]
+                    terms = []
+                    for n, c in zip(names, coeffs):
+                        if abs(c) >= 1e-8:
+                            terms.append(f"{c:+.4f}·{n}")
+                    rhs = " ".join(terms) if terms else "0"
+                    print(f"  new_axis{k+1}(x) = {rhs}")
+
+                # Sanity check: covariance of whitened embeds ~ identity
+                Te = self.t_embeds.astype(np.float64)
+                C = (Te - Te.mean(0)).T @ (Te - Te.mean(0)) / max(1, Te.shape[0]-1)
+                print("\n[whiten/debug] Covariance in whitened space (should be ~I):")
+                with np.printoptions(precision=3, suppress=True):
+                    print(C)
+        # ================= END DEBUG PRINTS =============================
+
 
     def _transform_query(self, e):
         """Apply the stored metric transform to a single query ``e`` (shape ``[4]``).

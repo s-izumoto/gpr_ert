@@ -52,7 +52,7 @@ pip -V
     │   ├── measurements_warmup.py   # 初期（ウォームアップ）Wenner測定の順計算
     │   ├── measurements_post_warmup.py  # 拡張配列型の順計算
     │   ├── gpr_seq_core.py          # ガウス過程回帰（GPR）のコア実装
-    │   ├── sequential_GPR.py        # gpr_seq_coreをラップする逐次設計ドライバ
+    │   ├── sequential_GPR.py        # sequential_GPRをラップする逐次設計ドライバ
     │   ├── invert_GPR.py            # GPR選択測定データの一括逆解析
     │   ├── forward_invert_Wenner.py # Wenner配列基準の順計算＋逆解析ワークフロー
     │   └── evaluate_GPR_vs_Wenner.py# 評価指標と比較関数

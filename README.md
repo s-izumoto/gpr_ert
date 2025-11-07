@@ -56,7 +56,7 @@ gpr_ert/
 │   ├── measurements_warmup.py   # Forward simulation for initial (warm-up) Wenner measurements
 │   ├── measurements_post_warmup.py  # Forward simulations for extended array types
 │   ├── gpr_seq_core.py          # Core Gaussian Process Regression (GPR) implementation
-│   ├── sequential_GPR.py        # Sequential design driver wrapping gpr_seq_core
+│   ├── sequential_GPR.py        # Sequential design driver wrapping sequential_GPR
 │   ├── invert_GPR.py            # Batch inversion of GPR-selected measurements
 │   ├── forward_invert_Wenner.py # Forward and inversion workflow for Wenner array-based baseline
 │   └── evaluate_GPR_vs_Wenner.py# Comparison metrics and evaluation functions
