@@ -1,9 +1,17 @@
-# GPR–ERT 逐次設計と評価パイプライン
+# GPR–ERT 逐次設計と評価
 
-このリポジトリは、**電気比抵抗トモグラフィ（ERT）** と **ガウス過程回帰（GPR）** に基づく **逐次実験設計** の完全なワークフローを実装しています。  
+このリポジトリは、**電気比抵抗トモグラフィ（ERT）** の **ガウス過程回帰（GPR）** に基づく **逐次実験設計** を実装しています。  
 不均一な比抵抗場の生成から、逆解析、そしてWenner配列を用いた基準との定量的比較までのすべての段階をカバーします。
 
-# GPRベース逐次設計：性能概要
+## 要約 (TL;DR)
+- **目的:** ガウス過程回帰（GPR）に基づく逐次的な実験設定によって、地中電気探査（ERT: Electrical resistivity tomography）の測定を最適化します。これにより、測定値と過去の測定デザインをもとに、次に最も情報価値の高い測定位置を自動的に選択し、事前知識なしで対象ごとに最適な測定系列を構築できます。
+- **前提:** 測定には32本の電極を用い、地表に等間隔で線状に配置します。
+- **pyGIMLi:** オープンソースの地球物理シミュレーションライブラリであり、本ワークフローではERT測定を数値的に再現するために使用します。
+- **ワークフロー:** 合成2次元比抵抗フィールドの生成 → 測定値・測定デザインのデータセット生成 → GPRによる逐次測定シミュレーション → 基準法との比較  
+- **使用スクリプト:** `01_make_fields.py` ～ `10_plot_summary.py`
+- **設定:** すべてのスクリプトは YAML 設定ファイルを使用します。
+
+## GPRベース逐次設計：性能概要
 
 **Wenner配列を用いた基準と比較**して、**Mutual Information ベースの獲得関数**を用いた GPR 逐次設計 は、全体的な評価指標において一貫した性能向上を示しました。比較画像の例は `images_example/` フォルダーにあります。
 
@@ -38,9 +46,6 @@ pip -V
 
 ---
 ## 🧭 プロジェクト構造
-
-このリポジトリは、**設定・実行・コア機能**を明確に分離した階層構造を持っています。\
-このモジュール化された構成により、パイプラインの**再現・デバッグ・拡張**が容易になります。
 
     gpr_ert/
     ├── build/                       # 再利用可能なモジュール群とコアロジック
@@ -92,9 +97,6 @@ pip -V
     YAML設定を読み込み、対応する`build/`モジュールを呼び出す最小限のCLIスクリプト。\
 -   **configs/** ---
     実験パラメータ群を格納。YAMLファイルを変更するだけで再現可能な実験を実行できます。
-
-この構成により、**ロジック・実行・設定の明確な分離**が実現し、\
-透明性と再現性の高い研究ワークフローが可能になります。
 
 ------------------------------------------------------------------------
 
@@ -270,3 +272,450 @@ pip -V
 
 ---
 
+## 各スクリプトの詳細説明
+このセクションでは、各スクリプトの目的と主な入出力をまとめています。ファイル名やパスは YAML の設定に従います。
+
+### **01_make_fields.py & make_fields.py — 合成比抵抗マップ生成ステップ**  
+**目的:**  
+複数の地質・環境シナリオ（例: 地層構造、塩水侵入、水位変動など）に基づく**2次元の合成比抵抗マップ（log₁₀ρ）データセット**を生成します。  
+`01_make_fields.py` がYAML設定ファイルを読み込み、指定されたパラメータを `make_fields.py` に渡して、シミュレーション的に多様な地質構造を生成します。  
+
+**処理概要:**  
+1. **YAML読込 (`01_make_fields.py`)**  
+   - 設定ファイルを読み込み、解像度・サンプル数・乱数シードなどを取得。  
+   - 抽出したパラメータをコマンドライン引数として `make_fields.py` に転送。  
+
+2. **フィールド生成 (`make_fields.py`)**  
+   - 指定したケース（TRACER, GEOLOGY, SURFACE, SEAWATER, WATERTABLE, RESISTIVE）ごとに、滑らかな層構造と異方的・不均質な変動を持つ log₁₀(ρ) マップを生成。  
+   - 各ケースで指定数（例: 200 枚）のサンプルを生成してデータセットを構築。  
+   - 各マップは上層の構造的特徴を強調し、深部では平滑化された抵抗構造を再現。  
+
+3. **保存とメタデータ出力**  
+   - 全マップを `dataset.npz`（配列: X_log10, y, cases）として圧縮保存。  
+   - クラスラベル対応表 (`label_map.json`) とメタ情報 (`meta.json`) を出力。  
+   - （任意）プレビュー画像を `previews/` フォルダに保存。  
+
+**入出力:**  
+- **入力:**  
+  - YAML設定ファイル（例: `configs/make_fields.yml`）  
+- **出力:**  
+  - `dataset.npz` （形状: N×NZ×NX, 値は log₁₀(ρ[Ω·m])）  
+  - `label_map.json` （ケース名 → クラスID の対応表）  
+  - `meta.json` （格子サイズ・クラス情報・範囲・サンプル数など）  
+  - `previews/`（任意、PNGプレビュー画像）
+
+### **02_fit_pca.py & fit_pca.py — 主成分分析（PCA）による次元圧縮ステップ**  
+**目的:**  
+前ステップで生成した比抵抗マップ（log₁₀ρ）データセットに対して、**主成分分析（PCA）**を適用し、空間的特徴を少数の潜在変数に圧縮します。  
+`02_fit_pca.py` は設定ファイル（YAML）を読み込み、内容をコマンドライン引数に変換して `fit_pca.py` を実行します。`fit_pca.py` は実際のPCA処理を行い、学習済み基底・投影結果・再構成プレビューなどを保存します。  
+
+**処理概要:**  
+1. **YAML読込 (`02_fit_pca.py`)**  
+   - PCAの設定（入力データ、出力ディレクトリ、最大主成分数、目標分散、解法など）を読み込み。  
+   - それらの値をCLI引数に変換し、`fit_pca.py` を実行。  
+
+2. **PCAフィッティング (`fit_pca.py`)**  
+   - `.npz` ファイルから `X_log10`（形状: N×NZ×NX）を読み込み、必要に応じて上部（浅部）のみを `--crop-frac` で切り出し。  
+   - データを `(N, D)` にフラット化し、`PCA` または `IncrementalPCA` で次元削減を実施。  
+   - 単一のPCA（全データ）またはクラス別PCA（`--per-class`）を選択可能。  
+   - 各主成分の累積寄与率を計算し、`--target-var` に到達する最小次元 `k*` を自動決定。  
+   - 学習済みPCA基底、メタ情報、（任意で）低次元座標や再構成画像を保存。  
+
+3. **出力の保存**  
+   - 共通PCAの場合: `pca_joint.joblib`, `pca_joint_meta.json`, `Z.npz`（任意）, `previews_joint_all/`（任意）。  
+   - クラス別PCAの場合: `pca_class*.joblib`, `pca_per_class_meta.json`, `Z_per_class.npz`（任意）。  
+
+**入出力:**  
+- **入力:**  
+  - `.npz` 形式のデータセット（例: `dataset.npz`）  
+    - 必須: `X_log10`（N×NZ×NX）  
+    - 任意: `y`（クラスラベル）, `cases`（サンプル名など）  
+  - YAML設定ファイル（例: `configs/fit_pca.yml`）  
+- **出力:**  
+  - `pca_joint.joblib` （共通PCAの平均・基底ベクトル・寄与率など）  
+  - `pca_joint_meta.json` （主要パラメータと累積寄与率）  
+  - `pca_class*.joblib` （クラス別PCAの場合）  
+  - `pca_per_class_meta.json` （クラスごとのメタ情報）  
+  - `Z.npz` / `Z_per_class.npz` （低次元潜在表現）  
+  - `previews_joint_all/` （任意、真値と再構成の比較PNG）  
+
+
+### **03_cluster_pca.py & cluster_pca.py — PCA潜在空間のクラスタリング＆代表サンプル出力ステップ**  
+**目的:**  
+前ステップで得た潜在ベクトル **Z（PCAの低次元表現）** をクラスタリングして、**代表的なパターンの把握・要約**を行います。  
+`03_cluster_pca.py` は設定（YAML）を読み込み、内容をCLI引数に変換して `cluster_pca.py` を実行します。`cluster_pca.py` は Z のクラスタリング、メタ情報・ラベルの保存、**クラスタ中心の再構成画像（centroids）**や**実サンプル代表（medoids）**の再構成画像出力、**エルボー法のkスイープ**（任意）を行います。  
+
+**処理概要:**  
+1. **YAML読込・引数転送（`03_cluster_pca.py`）**  
+   - キー→フラグの固定マッピングで、`--Z`, `--pca`, `--k`, `--algo`, `--n-init`, `--max-iter`, `--random-state`, `--out` などを組み立て。  
+   - 機能トグル（例: `silhouette: true` → `--silhouette`, `elbow: true` → `--elbow`）を反映し、`cluster_pca.py` を起動。  
+
+2. **クラスタリング本体（`cluster_pca.py`）**  
+   - **入力読込:** `Z.npz` の `Z (N×z_dim)` と `pca_joint.joblib`（mean, components, nz, nx, evr など）をロード。  
+   - **（任意）ホワイトニング:** PCAの寄与率 `explained_variance_ratio` に基づき、各軸を `sqrt(EVR)` で割ってスケーリング。  
+   - **学習:** `--algo` に応じて **KMeans / MiniBatchKMeans** を選択して学習・予測（`--k`, `--n-init`, `--max-iter`, `--random-state`）。  
+   - **（任意）エルボー法:** `--elbow` 有効時に `k_min..k_max` を `k_step` で走査し、**inertia–k 曲線**（CSV/PNG）と自動推定した elbow k（JSON）を保存。  
+   - **保存:** 予測ラベル（`kmeans_labels.npz`）、クラスタサイズや慣性・シルエット（任意）を含む `meta.json` を出力。  
+   - **（任意）再構成出力:**  
+     - **centroids/**: 各クラスタ中心（Z空間の重心）を PCA の逆変換で **X 空間（画像）に再構成**してPNG保存。  
+     - **medoids/**: 各クラスタ中心に最も近い実サンプル（medoid）を選び、**実データ由来の代表画像**をPNG保存。対応表は `medoids_index.npz` に保存。  
+
+**入出力:**  
+- **入力:**  
+  - 潜在表現：`Z.npz`（キー: `Z`, 形状 = N×z_dim）  
+  - PCA基底：`pca_joint.joblib`（少なくとも `mean`, `components`, `nz`, `nx`。あれば `explained_variance_ratio` でwhiten可能）  
+  - YAML設定ファイル（例: `configs/pca/cluster_pca.yml`）  
+- **出力:**  
+  - 予測ラベル：`kmeans_labels.npz`（`labels` = N,）  
+  - メタ情報：`meta.json`（algo, k, inertia, sizes, whiten有無, （任意）silhouette）  
+  - **（任意）エルボー:** `elbow_inertia.csv`, `elbow.png`, `elbow_meta.json`  
+  - **代表画像:**  
+    - **centroids/**：クラスタ中心の再構成PNG  
+    - **medoids/**：各クラスタの実サンプル代表の再構成PNG  
+    - `medoids_index.npz`：クラスタID・元インデックス・PNG相対パスの対応表（**任意だが強く推奨**）
+
+**注意（推奨）:**  
+- `medoids_index.npz` は後段の **GPR（Gaussian Process Regression）ベースの設計**で参照する想定のため、**出力を有効化することを推奨**します（設定ファイル／フラグで medoids 出力をオンにしてください）。
+
+### **04_measurements_warmup.py & measurements_warmup.py — ERT ウォームアップ順解析（Wenner-α, 固定センサー線）ステップ**
+**目的:**  
+PCAで得た潜在表現 **Z** から浅部の log₁₀ρ を再構成し、深さ方向にパディングしたうえで **pyGIMLi** による **Wenner-α 配列**の順解析を実行し、**設計特徴量（D/Dnorm/ABMN）→ ラベル y=log10(rhoa)** の教師データ束を作成します。  
+`04_measurements_warmup.py` は設定（YAML）を読み込み、内容をCLI引数に変換して `measurements_warmup.py` を実行します。`measurements_warmup.py` が forward シミュレーション本体を担当します。
+
+**処理概要:**  
+1. **YAML読込とCLI組み立て（`04_measurements_warmup.py`）**  
+   - 既知キーのみをマッピングして CLI フラグへ変換（ブールはフラグ化、配列は繰り返し展開）。  
+   - `active_policy: explicit` の場合は `active_indices` と `n_active_elec` の整合をチェック。  
+   - `pattern` 未指定時は **`wenner-alpha`** を既定として `measurements_warmup.py` を起動。  
+
+2. **順解析本体（`measurements_warmup.py`）**  
+   - **PCA pack**（`mean`, `components`, `nz`, `nx`）と **Z** を読込み、`Z @ components + mean` で **浅部 log₁₀ρ（nz×nx）** を再構成 → **最下行の複写**で `nz_full` までパディング。  
+   - 地表に **等間隔の固定センサー線**（`n_elec`, `dx_elec`, `margin`）を生成し、**Wenner-α** を **アクティブ部分集合**上で列挙（`every_other` / `first_k` / `explicit`）。  
+   - 2D メッシュを構築 → 画像（log₁₀ρ）をセルへサンプリング → **ERT forward**（`--mode 2d/25d`）で **rhoa** を計算。  
+   - **設計特徴量** `D = [dAB, dMN, mAB, mMN]`（m）と、内側幅基準の **正規化特徴量 `Dnorm`** を作成。  
+   - 必要に応じて相対ガウスノイズ（`--noise-rel`）を付与し、**ラベル** `y = log10(rhoa)` を生成。  
+   - 全フィールドを連結して **学習用NPZバンドル**を出力。  
+
+3. **出力の保存（NPZ, 付随ファイル）**  
+   - `ert_surrogate_wenner.npz`：  
+     - `Z` (M, k) … 潜在ベクトル（設計ごとに反復）  
+     - `D` (M, 4) … 設計特徴量 `[dAB,dMN,mAB,mMN]` [m]  
+     - `Dnorm` (M, 4) … 内側幅 `L_inner` による 0–1 正規化  
+     - `ABMN` (M, 4) int32 … 固定センサー列に対する **グローバル** 0始インデックス  
+     - `y` (M,) … **log10(rhoa)**  
+     - `rhoa` (M,) … 見かけ比抵抗 [Ω·m]（ノイズ付き可）  
+     - `k` (M,) … 幾何学係数  
+     - `xs` (n_elec,) … センサーの地表 x 座標 [m]  
+     - `meta` … 幾何・パターン・シード等のJSON文字列  
+   - `field_source_idx.npy`：Zスライス内での元フィールド行インデックス  
+
+**入出力:**  
+- **入力:**  
+  - PCA pack（`pca_joint.joblib` 等; `mean/components/nz/nx` を含む）  
+  - 潜在 `Z`（.npy/.npz; 2D 形状 N×k）  
+  - YAML（ランチャー用設定; 例 `pattern`, `n_active_elec`, `active_policy`, `nz_full/nx_full`, `n_elec/dx_elec/margin`, `noise_rel`, `jobs` など）  
+- **出力:**  
+  - `outputs/ert_surrogate_wenner.npz`（上記一式）  
+  - `outputs/field_source_idx.npy`（再現性のためのフィールド索引）  
+
+### **05_measurements_post_warmup.py & measurements_post_warmup.py — ERT順解析（ウォームアップ後／複数配列対応）ステップ**
+**目的:**  
+PCA由来の潜在表現 **Z** をもとに浅部 log₁₀ρ を再構成し、深さ方向へパディングした断面上で **pyGIMLi** により ERT の順解析を大量実行します。  
+`05_measurements_post_warmup.py` は設定（YAML）を読み込み、内容をCLI引数に変換して `measurements_post_warmup.py` を実行します。`measurements_post_warmup.py` が実際の設計列挙と forward 計算・特徴量作成・NPZ出力を担当します。
+
+**処理概要:**  
+1. **YAML読込→CLI起動（`05_measurements_post_warmup.py`）**  
+   - 主要キー（`pca, Z, out, n_fields, nz_full/nx_full, n_elec/dx_elec/margin, pattern, n_active_elec, active_policy, active_indices, noise_rel, jobs` など）をCLIフラグにマッピング。  
+   - `pattern` を正規化（`wenner-alpha / schlumberger / dipole-dipole / gradient / all`）。未指定時は `wenner-alpha`。  
+   - `active_policy=explicit` のとき、`active_indices` の長さ≒`n_active_elec` を検証。  
+   - `--dry` でコマンドの表示のみも可。
+
+2. **データセット生成（`measurements_post_warmup.py`）**  
+   - **PCA pack**（`mean, components, nz, nx`）と **Z**（N×k）を読込。`Z @ components + mean` で浅部 log₁₀ρ を再構成 → 最下行を繰り返して `nz_full` までパディング。  
+   - 地表に **等間隔の固定センサー線**（`n_elec, dx_elec, margin`）を配置。必要に応じて **アクティブ電極サブセット**（`every_other / first_k / explicit`）を選定。  
+   - **配列パターン**を列挙：`wenner-alpha / schlumberger / dipole-dipole / gradient / all（重複除去）`。  
+   - メッシュ生成 → 画像をセルへサンプリング → **pyGIMLi ERT**（2D/軽量2.5D）で **rhoa** を計算（必要に応じて相対ガウスノイズを付与）。  
+   - **設計特徴量** `D=[dAB,dMN,mAB,mMN]` と **正規化特徴量** `Dnorm`（内側幅基準）を作成。ターゲットは **`y=log10(rhoa)`**。  
+   - 全フィールドを連結し、学習用の **「設計→応答」テーブル**を1つのNPZに集約。
+
+3. **出力（NPZ・付随ファイル）**  
+   - `ert_surrogate_all.npz`：  
+     - `Z` (rows, k_lat) … 設計ごとに繰り返した潜在ベクトル  
+     - `D` / `Dnorm` (rows, 4) … 設計特徴量とその正規化版  
+     - `ABMN` (rows, 4) int32 … 固定線に対する **グローバル0始** 電極インデックス（正準順）  
+     - `y` (rows,) … `log10(rhoa)`、`rhoa` (rows,) … ρa[Ω·m]、`k` (rows,) … 幾何学係数  
+     - `xs` (n_elec,) … 電極のx座標、`meta` … 実行設定・寸法など（JSON文字列）  
+   - `field_source_idx.npy`：Zスライス内の元フィールド行インデックス（再現性用）
+
+**入出力:**  
+- **入力:**  
+  - PCA pack（`pca_joint.joblib` 等：`mean, components, nz, nx`）  
+  - 潜在行列 `Z`（.npy/.npz、形状 N×k）  
+  - YAML（実行設定：幾何・配列・サブセット選定・ノイズ・並列など）  
+- **出力:**  
+  - `outputs/ert_surrogate_all.npz`（上記の設計・応答一式）  
+  - `outputs/field_source_idx.npy`
+
+**補足:**    
+- `pattern=all` は複数配列のユニオンを **相反則（(A,B,M,N) ~ (M,N,A,B)）の正準化**で重複排除して出力。
+
+
+### **06_sequential_GPR.py & sequential_GPR.py — ガウス過程回帰（GPR）による逐次測定設計ステップ**
+**目的:**  
+既存のウォームアップデータを基に、**ガウス過程回帰（GPR）**を用いて ERT（Electrical Resistivity Tomography）の**次に測定すべきABMN**を逐次的に最適化します。  
+`06_sequential_GPR.py` は設定（YAML）を読み込み、各フィールド（Z行）について `sequential_GPR.py` の `run_from_cfg()` を順に実行します。  
+`sequential_GPR.py` は1つのフィールドに対して、**ウォームアップ学習 → アクティブ設計ループ → ログ出力 → 結果の統合**を行います。
+
+---
+
+**処理概要:**  
+1. **設定読込とフィールド選択（`06_sequential_GPR.py`）**  
+   - YAML設定を読み込み、パラメータ（例: `fields`, `fields_from_medoids`, `workers`）を整理。  
+   - フィールドの指定は以下の2通り:
+     - `fields_from_medoids`: `medoids_index.npz` の `src_index` を読み込み、自動選定。  
+     - `fields`: 明示的にフィールド番号を指定。  
+   - 各フィールドに対して `run_from_cfg(cfg, field_index)` を呼び出し、結果をフィールド別フォルダ（`field000/` など）に保存。  
+   - 実行後、全フィールドのログを集約し、`GPR_bundle.npz` に統合。
+
+2. **GPRによる逐次設計（`sequential_GPR.py`）**  
+   - **データ読込:**  
+     PCA潜在ベクトル `Z`、対応するウォームアップデータ (`warmup_npz`)、全応答データ (`y_dataset`) を読み込み、対象フィールドの行を抽出。  
+   - **設計空間の構築:**  
+     `build.design` 内の **`ERTDesignSpace`** クラスを用いて、  
+     Wenner / Schlumberger / Dipole–Dipole / Gradient 配列の ABMN 組み合わせを列挙し、  
+     相反則を考慮して重複を除去した**正準化された設計空間**を作成。  
+   - **特徴量化:**  
+     各ABMNを `[dAB, dMN, mAB, mMN]` に変換（距離と位置を分離）、  
+     さらに設計空間の**メトリック変換**（例: `cdf+whiten`）を適用して正規化。  
+   - **ウォームアップ段階:**  
+     - 最初の `warmup_steps` サンプルで **GPRモデル**を学習。  
+     - カーネルは「距離」と「位置」それぞれに対する **RBFカーネル**の和または積（`kernel_compose`）＋**WhiteKernel** ノイズ項。  
+     - 各ステップでカーネルパラメータ・LML・誤差（RMSE, MAE, R²）を記録。  
+   - **アクティブループ:**  
+     - 残りの候補設計からランダムに `random_candidates` を抽出。  
+     - それぞれの後方平均・分散を求め、指定した**取得関数**（LCB / UCB / EI / MAXVAR / MI）に基づいて最も情報量の高い設計を選択。  
+     - 選択した設計の応答値を `y_dataset` から取得し、学習データを更新。  
+     - GPRモデルを再学習して次のステップへ進む。  
+
+3. **出力とログ構造:**  
+   各フィールドごとに以下のファイルを出力:  
+   - `candidate_stats.csv` ：各ステップの候補統計・取得関数値・選択設計  
+   - `gpr_params.csv`   ：カーネルパラメータ・ノイズレベル・学習誤差  
+   - `seq_log.npz`    ：全ステップの選択履歴・特徴量・応答履歴  
+   - `config_used.json`  ：実行時設定の保存  
+   実行後、全フィールドの結果を統合:  
+   - `bundle_candidate_stats.csv`  
+   - `bundle_gpr_params.csv`  
+   - `GPR_bundle.npz`  
+
+---
+
+**入出力:**  
+- **入力:**  
+  - `pca_joblib` : PCAメタファイル（潜在次元情報を含む）  
+  - `Z_path`   : 潜在ベクトル（各フィールドの特徴表現）  
+  - `warmup_npz` : ウォームアップ測定データ（ABMN, y）  
+  - `y_dataset`  : 全設計候補に対する応答（ABMN, yまたはρa）  
+  - YAML設定ファイル 例: `configs/sequential_GPR.yml`  
+- **出力:**  
+  - 各フィールドフォルダ: `candidate_stats.csv`, `gpr_params.csv`, `seq_log.npz`, `config_used.json`  
+  - 集約ファイル: `bundle_candidate_stats.csv`, `bundle_gpr_params.csv`, `GPR_bundle.npz`
+
+---
+
+**`build` パッケージと `design.py` の役割**
+
+`sequential_GPR.py` は次のようにインポートします:
+from build.design import ERTDesignSpace
+**build はフォルダー（Pythonパッケージ）**で、その中の `design.py` に `ERTDesignSpace` が定義されています。`ERTDesignSpace` は GPR スクリプトにおける「測定設計空間の生成と幾何処理」を担う中核コンポーネントです。
+
+**build/design.py の主な機能:**
+
+- **ABMN設計の列挙:**  
+  電極数・最小間隔・重複禁止条件を満たす (A,B,M,N) を全列挙し、相反則 (A,B,M,N) ≡ (M,N,A,B) で重複を削除。
+
+- **連続埋め込み:**  
+  各離散設計を正規化連続特徴 `[dAB, dMN, mAB, mMN] ∈ [0,1]^4` に変換。
+
+- **メトリック変換:**  
+  設計特徴を統計的に標準化・装飾化する手法を実装（`identity`, `perdim`, `whiten`, `cdf`, `cdf+whiten`）。
+
+- **最近傍探索:**  
+  変換後空間で `nearest_1` / `nearest_k` 検索（SciPy cKDTree / sklearn KDTree / ブルートフォース）。
+
+- **ポリシー補助:**  
+  `map_uv_to_embed(u ∈ (0,1)^4)` により、ニューラルポリシー等の出力を実現可能な設計空間内の連続 embed へ安全に写像。
+
+以上を踏まえ、`sequential_GPR.py` における設計特徴空間の定義・正規化・探索は、`build/design.py` の `ERTDesignSpace` に依存して動作します。
+
+
+### **07_invert_GPR.py & invert_GPR.py — 逐次設計ログの一括 ERT 逆解析ステップ（pyGIMLi）**
+**目的:**  
+GPR 逐次設計で得られた **ABMN–応答ログ（seq_log / bundle）** を入力として、pyGIMLi により **地中比抵抗分布（ρ[Ω·m]）をフィールドごとに逆解析**します。  
+`scripts/07_invert_GPR.py` は設定ファイル（YAML）を読み込み、内容をコマンドライン引数に変換して `invert_GPR.py` を実行します。  
+`invert_GPR.py` は **入力バンドルの解析 → メッシュ生成 → 逆解析の実行 → 画像/NPZに集約保存** を担当します。
+
+**処理概要:**  
+1. **YAML読込（`07_invert_GPR.py`）**  
+   - `--config` で指定された YAML を読み込み、入出力パス・幾何条件・並列数などを取得。  
+   - 取得したパラメータをコマンドライン引数に変換して `invert_GPR.py` を起動。  
+
+2. **入力解釈（`invert_GPR.py`）**  
+   - `npz` 内の **フィールド別キー**（例: `ABMN__field000`, `y__field000`）を自動検出。  
+   - `y` が `log10(ρa)` の場合は **10^y で線形 ρa** に復元。ABMN は **0/1 ベースを自動判定**して 0-based に正規化。  
+
+3. **幾何・メッシュ生成**  
+   - 電極数 `n_elec` と間隔 `dx_elec`（または `world_Lx`）から **等間隔電極座標**を生成。  
+   - 世界矩形と表層近傍を厚めにとる **2D ERT メッシュ**（`nx_full×nz_full` 目安、または `mesh_area` 指定）を作成。  
+
+4. **逆解析（pyGIMLi / ERTManager）**  
+   - 測定誤差率 `err`、正則化強度 `lam`、ロバスト化 `robust` を設定して **各フィールドを順次逆解析**。  
+   - 先頭フィールドはメインスレッド、残りは `workers` に応じて **並列**処理（集約時にラベルでソートして順序再現）。  
+
+5. **保存・可視化**  
+   - 各フィールドの逆解析ベクトル（セル毎の ρ）とメタ情報（セル中心、世界座標、可視化範囲など）を **単一 NPZ に集約**。  
+   - 画像は **線形/対数カラースケール**の PNG を保存（既定では先頭フィールドのみ、`images_all: true` で全フィールド）。  
+
+**入出力:**  
+- **入力:**  
+  - YAML 設定（例: `configs/invert_GPR.yml`）  
+  - `npz` バンドル：`seq_log.npz` または `GPR_bundle.npz`（キー例: `ABMN__field###`, `y__field###`）  
+- **出力:**  
+  - **画像**：`out`（線形スケールPNG）, `out_log`（対数スケールPNG）／`images_all: true` で全フィールド保存  
+  - **NPZ バンドル**（例: `inversion_bundle_GPR.npz`）  
+    - 逆解析結果：`inv_rho_cells__field####`（セルごとの ρ[Ω·m]）  
+    - 観測再保存：`abmn__field####`, `rhoa__field####`（線形 ρa）  
+    - メッシュ/座標：`cell_centers`, `L_world`, `Lz`, `world_xmin/xmax/zmin/zmax` ほか  
+    - 可視化範囲：`cmin__field####`, `cmax__field####`  
+
+### **08_forward_invert_Wenner.py & forward_invert_Wenner.py — ERT 順解析＋逆解析（Wenner対応）ステップ**
+**目的:**  
+PCA の潜在ベクトル **Z** から **log₁₀ ρ** フィールドを再構成し、pyGIMLi で **ERT の順解析（ρa シミュレーション）**を実行します。さらに、必要に応じて **逆解析（比抵抗分布の推定）**を行い、画像と NPZ バンドルに集約保存します。  
+`08_forward_invert_Wenner.py` は **設定ファイル（YAML）を読み込み → キーを CLI フラグに変換 → 指定スクリプトを起動**するランナーです（既定は `build/forward_invert_Wenner.py`）。:contentReference[oaicite:0]{index=0}  
+`forward_invert_Wenner.py` は **PCA 再構成 → メッシュ生成 → 配列設計（Wenner/ランダム） → 順解析 →（任意）逆解析 → 出力** を担うコア実装です。:contentReference[oaicite:1]{index=1}
+
+---
+
+**処理概要:**  
+1. **YAML 読込と CLI 変換（`08_forward_invert_Wenner.py`）**  
+   - YAML（`inputs/selection/geom/design/forward/output/misc`）の各キーを `KEYMAP` に従って **コマンドライン引数へ写像**。未定義キーは無視。  
+   - 変換後、指定ターゲット（既定 `./build/forward_invert_Wenner.py`）を **サブプロセスで起動**。開始/終了時刻と経過秒を表示。
+
+2. **PCA 再構成とフィールド選択（`forward_invert_Wenner.py`）**  
+   - `pca`（joblib）から **mean/components/nz/nx** を取得し、`Z` から **log₁₀ρ** を再構成。必要に応じて深さ方向をパディング（`nz_full`）。  
+   - フィールドは **明示指定（`--fields`）／範囲（`--n-fields`, `--field-offset`）／seq_log NPZ からの自動抽出**のいずれかで選択。
+
+3. **幾何・メッシュ**  
+   - 電極数 `n_elec`、間隔 `dx_elec`（>0 なら **world 長 = 2×margin + (n_elec-1)×dx**）または `world_Lx` から **等間隔の表面電極**を生成。  
+   - 表層直下に補助ノードを追加した **2D メッシュ**を作成（`mesh_area`/`quality` 指定可）。縦方向サイズ `Lz` は格子分割から決定。
+
+4. **配列設計（Wenner／ランダム）**  
+   - **Wenner**：`a∈[a_min,a_max]` の **A–M–N–B** 列挙で有効 quadruple を全生成。  
+   - **ランダム**：幾何制約（`dAB/dMN` 範囲、A/B と M/N の非重複等）下で **一意な AB と MN** をサンプリング。  
+   - いずれも **[dAB, dMN, mAB, mMN]** を計算し、**内側幅 L で正規化**した `Dnorm` を構築。  
+
+5. **順解析（pyGIMLi）**  
+   - メッシュのセル比抵抗へ `10**(log₁₀ρ)` を割り当て、`ert.simulate()` で **ρa** を計算。`noise_rel` に応じて **相対ガウス雑音**を付与。  
+   - 出力バンドル `ert_surrogate.npz` に **Z, D, Dnorm, ABMN, y=log₁₀ρa, ρa, 幾何, メタ** を保存。 
+
+6. **（任意）逆解析**  
+   - `--invert` が有効なら、`ERTManager.invert()`（例：`err=0.03, lam=20, robust=True`）で **フィールドごとに逆解析**。  
+   - **線形／対数カラー**の PNG を保存（既定は先頭フィールド、`--inv-save-all-png` で全フィールド）。  
+   - さらに **inversion bundle**（`inv_log/ inv_rho` 各フィールド、`cell_centers`、世界座標、各フィールドの `abmn`/`rhoa` など）を **単一 NPZ** に集約。
+
+---
+
+**入出力:**  
+- **入力:**  
+  - **YAML 設定**（例：`configs/forward_invert_Wenner.yml`）— ランナーが読み込み、CLI へ変換。
+  - **PCA**（joblib: mean/components/nz/nx）、**Z**（`.npy`/`.npz`）、（任意）**seq_log NPZ**（フィールド抽出用）。
+- **出力:**  
+  - **サロゲート統合データ**：`out/ert_surrogate.npz`（`Z, D, Dnorm, ABMN, y, rhoa, k, xs, field_ids, meta`）。:contentReference[oaicite:10]{index=10}  
+  - **画像**：`inversion_fieldXXX.png` / `_log.png`（オプション）。
+  - **逆解析統合データ**：`inversion_bundle_Wenner.npz`（各フィールドの `inv_rho_cells__field###`, `inv_log_cells__field###` とメタ）。
+
+**補足:**  
+逆解析（pyGIMLiによる比抵抗再構成）は **任意設定** ですが、  
+後続のステップで **GPR の結果（予測比抵抗マップ）との比較・評価** に用いられるため、  
+本ステージでは **`invert: true`（または `--invert`）を有効にすることを推奨**します。  
+
+---
+
+### **09_evaluate_GPR_vs_Wenner.py & evaluate_GPR_vs_Wenner.py — GPR と Wenner 基準の評価ステップ（指標・可視化）**
+**目的:**  
+前段で得られた **逆解析（pyGIMLi）結果** と、PCA から再構成した **真値（log₁₀ρ）** を用いて、**GPR 逐次設計**と**Wenner 配列の基準**を多面的に比較・評価します。  
+`scripts/09_evaluate_GPR_vs_Wenner.py` は **設定ファイル（YAML）を受け取り、対象スクリプトを `--config` 付きで起動**するランナーです。:contentReference[oaicite:0]{index=0}  
+`evaluate_GPR_vs_Wenner.py` は **評価ロジック本体**で、スカラー指標（MAE/RMSE/相関など）と空間指標（フーリエ相関・形態学的 IoU・JSD）を計算し、プロットと集計を出力します。
+
+**処理概要:**  
+1. **YAML 読込・実行（`09_evaluate_GPR_vs_Wenner.py`）**  
+   - `--config`（必須）と `--script`（任意、既定 `build/evaluate_GPR_vs_Wenner.py`）を受け取り、**両パスの存在を検証**。  
+   - Python サブプロセスで **`<script> --config <yaml>` を実行**し、開始・終了時刻と経過秒を表示します。
+
+2. **評価本体（`evaluate_GPR_vs_Wenner.py`）**  
+   - **PCA 真値再構成:** `pca.joblib` と `Z.npz` から、指定フィールドの **真の log₁₀ρ 2D マップ**を再構成。  
+   - **入力モード:**  
+     - *モードA: 統合NPZ（bundle）比較* — **Wenner 統合NPZ** と **OTHER（例: GPR）統合NPZ** を同一フィールド集合で比較。各統合NPZは `inv_rho_cells__fieldNNN` と共通メタ（`cell_centers`, `L_world`, `Lz`, `world_xmin`, `world_zmax`）を含むこと。 
+     - *モードB: 単体NPZ比較* — 特定フィールドに対する **単一フィールドNPZ** を複数本比較（ラベル付け可）。
+   - **指標計算:**  
+     - スカラー指標（**log領域**: MAE/RMSE/bias/相関、**線形領域**: MAE/RMSE/相対%）を **深さ重み w(z)=exp(-depth/λ)**（任意）付きで算出。
+     - 空間類似度：**2Dフーリエ振幅スペクトル相関**, **形態学的IoU（Otsu二値化＋クロージング）**, **Jensen–Shannonダイバージェンス**。
+   - **サブセット評価:** 全セル（all）、**bottom25% / top25%**（真値の四分位）、**shallow50% / deep50%**（物理的深さ）で並列に算出。
+   - **可視化:** パリティ図、残差ヒストグラム、残差 vs 真値の散布図を PNG として出力（任意）。
+
+**入出力:**  
+- **入力（共通）:**  
+  - `pca`: PCA メタ（`mean`, `components`, `nz`, `nx` を含む joblib）  
+  - `Z`: PCA 係数（`Z` 配列を含む npz）  
+  - `out_dir`: 出力先ディレクトリ  
+  - `lambda_depth`（任意）: 深さ重みの減衰長（m, 0以下で無効）  
+  - `plots`（任意）: 可視化 PNG を出力するか  
+  - `scatter_max`（任意）: 散布図の点数上限（ダウンサンプル）  
+- **入力（モードA: 統合NPZ比較）:**  
+  - `wenner_bundle`: Wenner **統合NPZファイル**  
+  - `other_bundle`（または `inv_npz_bundle` / `inv_npz`）: 比較対象（例: **GPR 統合NPZ**）  
+  - `fields`（任意）: 比較対象とするフィールド番号のリスト（0始まり）
+- **入力（モードB: 単体NPZ）:**  
+  - `mode: "standalone"`  
+  - `inv_npz`: 単体NPZのパス配列（各 NPZ は `inv_rho_cells`, `cell_centers`, `L_world`, `Lz`, `world_xmin`, `world_zmax` を含む）  
+  - `field_idx`: PCA 真値再構成に用いるフィールド番号  
+  - `labels`（任意）: グラフや出力に用いる名前配列（`inv_npz` と同数）
+- **出力:**  
+  - `summary_metrics.json / .csv`：**ALL/深浅/四分位サブセット**ごとの全指標を集約  
+  - `parity_*.png`, `residual_hist_*.png`, `residual_vs_true_*.png`（`plots: true` の場合）  
+  - `per_cell_log10_*.csv`（`write_per_cell: true` の場合）
+
+---
+
+### **10_plot_summary.py — 評価サマリーの可視化・集計ステップ**
+**目的:**  
+`summary_metrics.csv`（各フィールド×各手法の評価指標を集約した表）を読み込み、**サブセット別**（`top25 / all / bottom25 / shallow50 / deep50`）に  
+(1) OTHER vs WENNER の**分布比較**（箱ひげ図）、(2) OTHER 相対改善率の**横棒グラフ**、(3) **IQR（Interquartile Range）/相対IQR**の比較、(4) **生データ/統計/ペア表**の CSV を自動生成します。
+
+**処理概要:**  
+1. **CSV 読込と前処理**  
+   - `label, subset, source` と主要指標列（`mae_log10, rmse_log10, ...`）を検証し、不足列は `NaN` で補完。
+2. **分布比較（OTHER vs WENNER）**  
+   - 各指標について、**OTHER 左・WENNER 右**の並列箱ひげ図を作成（平均線付き）。
+3. **相対改善率プロット**  
+   - 指標ごとに **2種類の%改善**を計算・可視化：  
+     - **PF**: フィールド別相対変化の平均 `mean_label(100×(OTHER−WENNER)/|WENNER|)`  
+     - **OVR**: 平均値どうしの相対変化 `100×(mean(OTHER)−mean(WENNER))/|mean(WENNER)|`  
+   - 相関/IoU は**プラスが改善**, 誤差/JSD は**マイナスが改善**として緑/赤で塗分け、PF（斜線）と OVR（ドット）を**ハッチで区別**。対応する CSV も保存。
+4. **スプレッド/IQR**  
+   - `IQR = Q3−Q1` と **Relative IQR(%) = 100×IQR/|median|** を算出し、OTHER vs WENNER を**棒グラフ**で比較。CSV も出力。 
+5. **値のエクスポート**  
+   - サブセットごとに以下を保存：  
+     - `values_<subset>.csv`：元行の**生値**  
+     - `values_stats_<subset>.csv`：source×metric の**集計統計**（count/mean/std/min/median/max/Q1/Q3）  
+     - `values_paired_<subset>.csv`：**同一 label の WENNER/OTHER/差分**のペア表（平均で重複解消）。
+
+**入出力:**  
+- **入力:**  
+  - `--csv`：評価サマリー CSV（既定 `data/evaluation/summary_metrics.csv`）。必須列：`label, subset, source` と主要指標（不足時は自動補完）。
+- **出力（サブセットごとに `--outdir` 配下へ）:**  
+  - 可視化：`compare_<subset>__*.png`（箱ひげ図）, `relative_change_<subset>.png`（相対%）  
+  - IQR：`iqr_<subset>.png`, `relative_iqr_<subset>.png`  
+  - CSV：`values_*.csv`, `values_stats_*.csv`, `values_paired_*.csv`, `relative_change_*.csv`, `relative_change_summary_*.csv`, `iqr_*.csv` ほか
+
+---
