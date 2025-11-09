@@ -12,8 +12,8 @@ scatter_max: 80000
 # ===== Mode B: bundles matched per-field (recommended) =====
 mode: bundle
 wenner_bundle: data/GPR/inversion_Wenner/inversion_bundle_Wenner.npz
-# Provide exactly one OTHER bundle (OR rename key to 'inv_npz_bundle')
-other_bundle: data/GPR/inversion_GPR/inversion_bundle_GPR.npz
+# Provide exactly one GPR bundle (OR rename key to 'inv_npz_bundle')
+GPR_bundle: data/GPR/inversion_GPR/inversion_bundle_GPR.npz
 
 # Output controls
 plots: false

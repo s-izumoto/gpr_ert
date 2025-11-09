@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 Evaluate ERT inversion results against PCA-reconstructed "true" fields (log10 resistivity),
-with support for per-field NPZ bundles (Wenner vs. another method) or standalone NPZ files.
+with support for per-field NPZ bundles (Wenner vs. GPR method) or standalone NPZ files.
 
 This module computes scalar accuracy metrics in both log and linear domains, depth-weighted
 if requested, and generates diagnostic plots (parity, residual histogram, residual vs. truth).
@@ -11,7 +11,7 @@ via Otsu binarization, and Jensen–Shannon divergence between histograms).
 Two operation modes are supported via a configuration dictionary:
 
 Mode A — "bundle":
-    Compare two NPZ *bundles* that store multiple fields (e.g., WENNER vs OTHER).
+    Compare two NPZ *bundles* that store multiple fields (e.g., WENNER vs GPR).
     Each bundle must contain keys of the form "inv_rho_cells__fieldNNN" for
     inversion cell values, and shared metadata arrays: "cell_centers", "L_world",
     "Lz", "world_xmin", "world_zmax".
@@ -20,7 +20,7 @@ Mode A — "bundle":
         pca: path to PCA joblib (contains mean, components, nz, nx, ...)
         Z:   path to PCA coefficients array (npz with key "Z")
         wenner_bundle: path to WENNER inversion bundle (npz)
-        other_bundle:  path to OTHER inversion bundle (npz) — alias: inv_npz_bundle / inv_npz
+        GPR_bundle:  path to GPR inversion bundle (npz) — alias: inv_npz_bundle / inv_npz
         out_dir: output directory (created if missing)
 
     Optional:
@@ -678,20 +678,20 @@ def run_from_cfg(cfg: dict) -> dict:
     all_metrics: list[dict] = []
 
     if mode == "bundle":
-        # Resolve bundle paths; allow aliases for OTHER
+        # Resolve bundle paths; allow aliases for GPR
         wenner_bundle = cfg.get("wenner_bundle", None)
-        other_bundle  = cfg.get("other_bundle", None) or cfg.get("inv_npz_bundle", None) or cfg.get("inv_npz", None)
-        if isinstance(other_bundle, list):
-            if len(other_bundle) == 1:
-                other_bundle = other_bundle[0]
+        GPR_bundle  = cfg.get("GPR_bundle", None) or cfg.get("inv_npz_bundle", None) or cfg.get("inv_npz", None)
+        if isinstance(GPR_bundle, list):
+            if len(GPR_bundle) == 1:
+                GPR_bundle = GPR_bundle[0]
             else:
-                raise SystemExit("For 'bundle' mode, 'other_bundle' must be a single NPZ path")
+                raise SystemExit("For 'bundle' mode, 'GPR_bundle' must be a single NPZ path")
 
-        if not wenner_bundle or not other_bundle:
-            raise SystemExit("mode=bundle requires 'wenner_bundle' and 'other_bundle' (or 'inv_npz_bundle').")
+        if not wenner_bundle or not GPR_bundle:
+            raise SystemExit("mode=bundle requires 'wenner_bundle' and 'GPR_bundle' (or 'inv_npz_bundle').")
 
         npz_w = np.load(wenner_bundle, allow_pickle=False)
-        npz_o = np.load(other_bundle, allow_pickle=False)
+        npz_o = np.load(GPR_bundle, allow_pickle=False)
 
         labels = list_field_labels_from_bundle(npz_w)
         if not labels:
@@ -726,13 +726,13 @@ def run_from_cfg(cfg: dict) -> dict:
             if inv_o is not None:
                 cc_o, Lx_o, Lz_o, xmin_o, zmax_o = load_bundle_meta(npz_o)
                 mlist_o = _eval_all_subsets(inv_o, cc_o, Lx_o, Lz_o, xmin_o, zmax_o, true_log2d,
-                                            lambda_depth, f"OTHER_{lab}", make_plots, scatter_max, out_dir,
+                                            lambda_depth, f"GPR_{lab}", make_plots, scatter_max, out_dir,
                                             write_per_cell=write_per_cell)
                 for m in mlist_o:
-                    m["label"] = lab; m["source"] = "OTHER"; m["field_idx"] = int(fidx)
+                    m["label"] = lab; m["source"] = "GPR"; m["field_idx"] = int(fidx)
                 all_metrics.extend(mlist_o)
             else:
-                print(f"[WARN] {lab} not found in OTHER bundle.")
+                print(f"[WARN] {lab} not found in GPR bundle.")
 
     elif mode == "standalone":
         inv_list = cfg.get("inv_npz", [])

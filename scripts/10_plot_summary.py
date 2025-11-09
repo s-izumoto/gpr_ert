@@ -1,6 +1,6 @@
 
 """
-10_plot_summary.py — Compare ERT inversion quality between WENNER and OTHER designs
+10_plot_summary.py — Compare ERT inversion quality between WENNER and GPR designs
 
 Purpose
 -------
@@ -8,24 +8,24 @@ This script reads a single CSV file containing per-field/per-run evaluation metr
 and generates outputs **for each subset** ("top25", "all", "bottom25", "shallow50", "deep50"):
 
 A) Distribution comparison:
-   - Side-by-side boxplots for OTHER vs WENNER (OTHER left, WENNER right).
+   - Side-by-side boxplots for GPR vs WENNER (GPR left, WENNER right).
 
-B) Relative-change analysis (OTHER vs WENNER within the same label):
+B) Relative-change analysis (GPR vs WENNER within the same label):
    - Horizontal bar chart of the *average* relative change across fields.
    - CSV of per-field relative % changes.
    - Spearman ρ is included; linear-scale RMSE/MAE are excluded in the relative plot.
-   - Bars are green where OTHER improves vs WENNER, red otherwise.
+   - Bars are green where GPR improves vs WENNER, red otherwise.
    - Both "Per-field mean %" and "Overall mean-based %" are plotted (visually distinguished).
 
 C) Raw value exports:
    - `values_<subset>.csv`: raw rows in the subset (sorted).
    - `values_stats_<subset>.csv`: per-source summary stats per metric.
-   - `values_paired_<subset>.csv`: per-label paired values (WENNER/OTHER/DIFF).
+   - `values_paired_<subset>.csv`: per-label paired values (WENNER/GPR/DIFF).
 
 D) Spread / stability:
    - `iqr_<subset>.csv`: per-source×metric Q1, median, Q3, IQR, Relative IQR(%).
-   - `iqr_<subset>.png`: bar chart comparing IQR of OTHER vs WENNER.
-   - `relative_iqr_<subset>.png`: bar chart comparing Relative IQR(%) of OTHER vs WENNER.
+   - `iqr_<subset>.png`: bar chart comparing IQR of GPR vs WENNER.
+   - `relative_iqr_<subset>.png`: bar chart comparing Relative IQR(%) of GPR vs WENNER.
 
 Relative IQR definition
 -----------------------
@@ -41,7 +41,7 @@ python 10_plot_summary.py \
 
 Notes
 -----
-- Labels order is OTHER, WENNER for visual consistency.
+- Labels order is GPR, WENNER for visual consistency.
 - Matplotlib < 3.9 falls back from `tick_labels` to `labels`.
 - MPLBACKEND is forced to "Agg" for headless environments.
 """
@@ -72,7 +72,7 @@ METRICS = [
 
 
 def save_boxplot(series_w: pd.Series, series_o: pd.Series, title: str, ylabel: str, outpath: Path) -> None:
-    """Save a boxplot that compares OTHER vs WENNER for one metric."""
+    """Save a boxplot that compares GPR vs WENNER for one metric."""
     fig = plt.figure(figsize=(6, 5))
     data = [series_o.dropna().values, series_w.dropna().values]
 
@@ -80,14 +80,14 @@ def save_boxplot(series_w: pd.Series, series_o: pd.Series, title: str, ylabel: s
     try:
         plt.boxplot(
             data,
-            tick_labels=["OTHER", "WENNER"],
+            tick_labels=["GPR", "WENNER"],
             showmeans=True,
             meanline=True,
         )
     except TypeError:
         plt.boxplot(
             data,
-            labels=["OTHER", "WENNER"],
+            labels=["GPR", "WENNER"],
             showmeans=True,
             meanline=True,
         )
@@ -101,17 +101,17 @@ def save_boxplot(series_w: pd.Series, series_o: pd.Series, title: str, ylabel: s
 
 
 def make_comparisons(df_subset: pd.DataFrame, subset_name: str, outdir: Path) -> None:
-    """Create boxplots (OTHER vs WENNER) for a dataframe subset."""
+    """Create boxplots (GPR vs WENNER) for a dataframe subset."""
     wenner = df_subset[df_subset["source"].str.upper() == "WENNER"]
-    other = df_subset[df_subset["source"].str.upper() == "OTHER"]
+    GPR = df_subset[df_subset["source"].str.upper() == "GPR"]
 
     for col, ylabel in METRICS:
-        if col not in wenner.columns or col not in other.columns:
+        if col not in wenner.columns or col not in GPR.columns:
             print(f"⚠ Column '{col}' missing, skipping plot.")
             continue
-        title = f"{ylabel} — OTHER vs WENNER ({subset_name})"
+        title = f"{ylabel} — GPR vs WENNER ({subset_name})"
         filename = f"compare_{subset_name}__{col}.png"
-        save_boxplot(wenner[col], other[col], title, ylabel, outdir / filename)
+        save_boxplot(wenner[col], GPR[col], title, ylabel, outdir / filename)
 
 
 def relative_change_table(df_subset: pd.DataFrame, metrics: list[str]) -> pd.DataFrame:
@@ -123,10 +123,10 @@ def relative_change_table(df_subset: pd.DataFrame, metrics: list[str]) -> pd.Dat
 
     for col in metrics:
         pivot = base.pivot_table(index="label", columns="source", values=col, aggfunc="mean")
-        for need in ["WENNER", "OTHER"]:
+        for need in ["WENNER", "GPR"]:
             if need not in pivot.columns:
                 pivot[need] = np.nan
-        rel = 100.0 * (pivot["OTHER"] - pivot["WENNER"]) / pivot["WENNER"].abs()
+        rel = 100.0 * (pivot["GPR"] - pivot["WENNER"]) / pivot["WENNER"].abs()
         out[col] = rel
 
     return pd.DataFrame(out)
@@ -136,10 +136,10 @@ def plot_relative_changes(df_subset: pd.DataFrame, subset_name: str, outdir: Pat
     """Plot *two* kinds of relative % changes per metric and save CSVs.
 
     1) Per-field mean relative change:
-       mean_label( 100 * (OTHER - WENNER) / |WENNER| )
+       mean_label( 100 * (GPR - WENNER) / |WENNER| )
 
     2) Overall mean-based relative change:
-       100 * ( mean(OTHER) - mean(WENNER) ) / | mean(WENNER) |
+       100 * ( mean(GPR) - mean(WENNER) ) / | mean(WENNER) |
 
     Visual distinction:
       - Keep green/red for improvement/worsening.
@@ -157,10 +157,10 @@ def plot_relative_changes(df_subset: pd.DataFrame, subset_name: str, outdir: Pat
     ]
 
     has_w = df_subset["source"].str.upper() == "WENNER"
-    has_o = df_subset["source"].str.upper() == "OTHER"
+    has_o = df_subset["source"].str.upper() == "GPR"
     common_labels = set(df_subset[has_w]["label"]).intersection(df_subset[has_o]["label"])
     if not common_labels:
-        print(f"⚠ No matching fields between WENNER and OTHER in {subset_name}")
+        print(f"⚠ No matching fields between WENNER and GPR in {subset_name}")
         return
 
     # 1) Per-field mean of relative changes
@@ -176,7 +176,7 @@ def plot_relative_changes(df_subset: pd.DataFrame, subset_name: str, outdir: Pat
             overall[col] = np.nan
             continue
         mean_w = float(base.loc[base["source"].str.upper() == "WENNER", col].mean())
-        mean_o = float(base.loc[base["source"].str.upper() == "OTHER", col].mean())
+        mean_o = float(base.loc[base["source"].str.upper() == "GPR", col].mean())
         denom = np.abs(mean_w) if (not np.isnan(mean_w) and mean_w != 0.0) else np.nan
         overall[col] = np.nan if (isinstance(denom, float) and np.isnan(denom)) else 100.0 * (mean_o - mean_w) / denom
 
@@ -226,11 +226,11 @@ def plot_relative_changes(df_subset: pd.DataFrame, subset_name: str, outdir: Pat
     ax.set_yticks(y)
     ax.set_yticklabels(labels)
     ax.set_xlabel(
-        "Relative change of OTHER vs WENNER (%)\n"
+        "Relative change of GPR vs WENNER (%)\n"
         "Negative is better for error/divergence metrics; Positive is better for correlations/IoU."
     )
     ax.set_title(
-        f"Relative performance — OTHER vs WENNER — {subset_name}\n"
+        f"Relative performance — GPR vs WENNER — {subset_name}\n"
         "(PF = Per-field mean, hatched ///  |  OVR = Overall mean-based, dotted …)"
     )
     ax.grid(True, axis="x", linestyle="--", alpha=0.5)
@@ -304,7 +304,7 @@ def compute_iqr_table(df_subset: pd.DataFrame) -> pd.DataFrame:
 
 
 def save_iqr_csv_and_plots(df_subset: pd.DataFrame, subset_name: str, outdir: Path) -> None:
-    """Save IQR table and create bar charts for IQR and Relative IQR comparing OTHER vs WENNER."""
+    """Save IQR table and create bar charts for IQR and Relative IQR comparing GPR vs WENNER."""
     tbl = compute_iqr_table(df_subset)
     if tbl.empty:
         print(f"⚠ IQR table empty for {subset_name}")
@@ -319,7 +319,7 @@ def save_iqr_csv_and_plots(df_subset: pd.DataFrame, subset_name: str, outdir: Pa
     iqr_w, iqr_o, ril_w, ril_o, labels = [], [], [], [], []
     for m in metrics_present:
         row_w = tbl[(tbl["metric"] == m) & (tbl["source"].str.upper() == "WENNER")]
-        row_o = tbl[(tbl["metric"] == m) & (tbl["source"].str.upper() == "OTHER")]
+        row_o = tbl[(tbl["metric"] == m) & (tbl["source"].str.upper() == "GPR")]
         if row_w.empty and row_o.empty:
             continue
         labels.append(dict(METRICS)[m])
@@ -333,12 +333,12 @@ def save_iqr_csv_and_plots(df_subset: pd.DataFrame, subset_name: str, outdir: Pa
 
     # Plot absolute IQR
     fig1, ax1 = plt.subplots(figsize=(10, 5))
-    ax1.bar(x - width/2, iqr_o, width, label="OTHER")
+    ax1.bar(x - width/2, iqr_o, width, label="GPR")
     ax1.bar(x + width/2, iqr_w, width, label="WENNER")
     ax1.set_xticks(x)
     ax1.set_xticklabels(labels, rotation=20, ha="right")
     ax1.set_ylabel("IQR (Q3 − Q1)")
-    ax1.set_title(f"IQR comparison — OTHER vs WENNER — {subset_name}")
+    ax1.set_title(f"IQR comparison — GPR vs WENNER — {subset_name}")
     ax1.grid(True, axis="y", linestyle="--", alpha=0.5)
     ax1.legend()
     plt.tight_layout()
@@ -347,12 +347,12 @@ def save_iqr_csv_and_plots(df_subset: pd.DataFrame, subset_name: str, outdir: Pa
 
     # Plot Relative IQR (%)
     fig2, ax2 = plt.subplots(figsize=(10, 5))
-    ax2.bar(x - width/2, ril_o, width, label="OTHER")
+    ax2.bar(x - width/2, ril_o, width, label="GPR")
     ax2.bar(x + width/2, ril_w, width, label="WENNER")
     ax2.set_xticks(x)
     ax2.set_xticklabels(labels, rotation=20, ha="right")
     ax2.set_ylabel("Relative IQR (%)  = 100 × IQR / |median|")
-    ax2.set_title(f"Relative IQR comparison — OTHER vs WENNER — {subset_name}")
+    ax2.set_title(f"Relative IQR comparison — GPR vs WENNER — {subset_name}")
     ax2.grid(True, axis="y", linestyle="--", alpha=0.5)
     ax2.legend()
     plt.tight_layout()
@@ -399,9 +399,9 @@ def save_values_stats(df_subset: pd.DataFrame, subset_name: str, outdir: Path) -
 
 
 def save_values_paired(df_subset: pd.DataFrame, subset_name: str, outdir: Path) -> None:
-    """Save a long-form paired table (label, metric, WENNER, OTHER, DIFF)."""
+    """Save a long-form paired table (label, metric, WENNER, GPR, DIFF)."""
     has_w = df_subset["source"].str.upper() == "WENNER"
-    has_o = df_subset["source"].str.upper() == "OTHER"
+    has_o = df_subset["source"].str.upper() == "GPR"
     common_labels = sorted(set(df_subset[has_w]["label"]).intersection(df_subset[has_o]["label"]))
     if not common_labels:
         print(f"⚠ No matching labels to pair in {subset_name}")
@@ -417,7 +417,7 @@ def save_values_paired(df_subset: pd.DataFrame, subset_name: str, outdir: Path) 
             continue
         pv = base.pivot_table(index="label", columns="source", values=col, aggfunc="mean")
         w = pv.get("WENNER")
-        o = pv.get("OTHER")
+        o = pv.get("GPR")
         # Align and iterate
         for lab in pv.index:
             wv = np.nan if w is None else w.get(lab, np.nan)
@@ -426,8 +426,8 @@ def save_values_paired(df_subset: pd.DataFrame, subset_name: str, outdir: Path) 
                 "label": lab,
                 "metric": col,
                 "WENNER": wv,
-                "OTHER": ov,
-                "DIFF(OTHER-WENNER)": (ov - wv) if (pd.notna(ov) and pd.notna(wv)) else np.nan
+                "GPR": ov,
+                "DIFF(GPR-WENNER)": (ov - wv) if (pd.notna(ov) and pd.notna(wv)) else np.nan
             })
 
     paired = pd.DataFrame(rows).sort_values(["metric", "label"])
