@@ -5,6 +5,7 @@
 
 This repository implements a full workflow for **synthetic Electrical Resistivity Tomography (ERT)** and **Gaussian Process Regression (GPR)**–based **sequential experimental design**.  
 It covers all stages from generating heterogeneous resistivity fields to inversion and quantitative evaluation against a Wenner array–based baseline.
+> ℹ️ For an overview of key terms such as ERT, GPR, inverse analysis, and electrode array, please refer to the “📘 Background” section at the end of this README.
 
 # GPR-Based Sequential Design: Performance Summary
 
@@ -239,3 +240,64 @@ The workflow spans from **synthetic field generation** to **inversion, evaluatio
     ```
 
 ---
+
+## 📘 Background
+
+### Electrical Resistivity Tomography (ERT)
+**Electrical Resistivity Tomography (ERT)** is a **geophysical imaging technique** used to infer subsurface structure and moisture distribution from **electrical resistivity**.  
+Multiple electrodes are installed on the ground surface or in boreholes. **A pair of electrodes (A, B)** injects current, while **another pair (M, N)** measures the resulting potential difference.  
+By repeating this process with many electrode combinations, one can obtain information to estimate the **subsurface resistivity distribution (ρ)**.  
+Because resistivity depends on **water content, salinity, and soil or rock type**, ERT enables non-destructive investigation of processes such as **infiltration, saltwater intrusion, contaminant transport, and subsurface structure characterization**.
+
+---
+
+### What Are Electrode Arrays?
+An **electrode array** is a **measurement design scheme** defining how multiple electrodes (e.g., 32) are placed on the surface and how electrode pairs (A–B for current, M–N for potential) are combined to perform repeated measurements.  
+When 32 electrodes are used, the number of possible (A–B–M–N) combinations is enormous, and the order and spacing of these combinations significantly affect measurement depth, sensitivity, and noise characteristics.  
+This **systematic enumeration of electrode combinations** is referred to as an *electrode array*. Representative types include:
+
+| Array Type | Characteristics | Typical Use |
+|:--|:--|:--|
+| **Wenner Array** | Four electrodes (A–M–N–B) equally spaced; simple combination generation | Robust to noise; suitable for shallow investigations |
+| **Schlumberger Array** | Current electrodes (A, B) placed far apart; potential electrodes (M, N) close together | High sensitivity to deeper structures |
+| **Dipole–Dipole Array** | Current and potential pairs separated | High spatial resolution; more sensitive to noise |
+| **Gradient Array** | Fixed current electrodes with multiple potential electrodes measured simultaneously | High measurement efficiency and dense data coverage |
+
+In this repository, the **Wenner–alpha array** is adopted as the reference configuration because of its symmetrical sensitivity distribution and suitability for comparison with **GPR-based sequential design**.
+
+---
+
+### What Is Inversion?
+ERT measurements provide **potential differences at the surface** corresponding to each electrode combination,  
+but what we truly seek is the **subsurface resistivity distribution** itself.  
+Thus, we must numerically determine a subsurface model that best explains the observed data—this process is known as **inversion**.  
+Here, inversion is performed using the open-source geophysical library **pyGIMLi**, yielding **reconstructed subsurface resistivity distributions** based on sequentially selected measurement series.  
+These inversion results are later used to **evaluate the performance of the GPR-based sequential design**.
+
+---
+
+### pyGIMLi (Python Geophysical Inversion and Modelling Library)
+**pyGIMLi** is an open-source library for numerical simulation and inversion in geophysical exploration.  
+It supports ERT, Induced Polarization (IP), and Spectral Induced Polarization (SIP), and performs **forward modelling, sensitivity analysis, and inversion** using the finite-element method (FEM).  
+In this repository, pyGIMLi is employed to **simulate both forward and inverse ERT computations using the Wenner array**,  
+allowing synthetic **apparent resistivity maps** to be generated from input conductivity fields.  
+These simulated “true” datasets are then used as **inputs and benchmarks** for evaluating the GPR sequential design.
+
+---
+
+### Sequential Design via Gaussian Process Regression (GPR)
+**Gaussian Process Regression (GPR)** models the **statistical correlation** between observation points.  
+For ERT-type measurements, GPR can infer **unmeasured electrode combinations (A–B–M–N)** from previously observed results and determine **which combination would provide the greatest information gain next**.  
+In this repository, GPR-based sequential design is applied not to the inverted subsurface model,  
+but to the **measurement data space (potential differences)** before inversion.  
+GPR learns correlations among electrode combinations and **sequentially generates measurement series that maximize efficiency**.  
+The effectiveness of this design is then evaluated by performing inversion on the GPR-selected measurement series and comparing the **reconstructed subsurface resistivity distributions** against those from the reference Wenner configuration.
+
+---
+
+### 🧩 Summary
+- **Electrical Resistivity Tomography (ERT)** estimates subsurface resistivity distributions by injecting current and measuring potential differences across many electrode combinations.  
+- An **electrode array** defines how multiple electrodes (e.g., 32) are combined to perform these measurements, controlling sensitivity and depth characteristics.  
+- **Inversion** reconstructs the subsurface resistivity distribution from measured data and is essential for evaluating the outcomes of GPR sequential design.  
+- **pyGIMLi** provides the numerical foundation for forward and inverse modelling in this workflow.  
+- The **GPR-based sequential design** operates in the *pre-inversion measurement data space*, and its effectiveness is quantitatively assessed through **inversion-based reconstruction accuracy** relative to the Wenner baseline.
