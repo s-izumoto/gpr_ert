@@ -1,4 +1,4 @@
-# GPR–ERT 逐次設計と評価
+# GPR–ERT 逐次実験設計と評価
 
 このリポジトリは、**電気比抵抗トモグラフィ（ERT）** の **ガウス過程回帰（GPR）** に基づく **逐次実験設計** を実装しています。  
 不均一な比抵抗場の生成から、逆解析、そしてWenner配列を用いた基準との定量的比較までのすべての段階をカバーします。
@@ -22,27 +22,58 @@
 - 特に **領域の下半分（深部）** において改善が顕著で、**Pearson r** は **18% 向上**、**Spearman ρ** は **16% 向上**、**RMSE** は **9% 低下** しました。  
 - **表層半分** においてもすべての指標で数パーセントの改善が見られ、**悪化した指標はありません** でした。
 
-## 🛠️ インストール
 
-このリポジトリには、環境を再現するための `environment.yml` が同梱されています。
+------------------------------------------------------------------------
 
-### クイックスタート（推奨）
-```bash
-# 0) （任意）Mambaforge または Miniconda をインストール
-#    https://conda-forge.org/miniforge/
+## 概念的な流れ
 
-# 1) 公開用の名前で環境を作成（ユーザー固有パスを使用しない）
-mamba env create -n gpr-ert -f environment.yml    # mamba がある場合
-# または
-conda env create -n gpr-ert -f environment.yml
+1.  **合成フィールド生成:** 現実的な地質的不均質性を再現する比抵抗フィールドを作成。
+2.  **次元削減:** PCAにより比抵抗マップを低次元潜在空間へ写像。
+3.  **サンプル選択:** シミュレーション対象となる代表ケースを選択。
+4.  **ウォームアップ順計算:** 標準配列構成を用いて初期ERT応答を収集。
+5.  **候補拡張:** 多数の配列構成に対する応答をシミュレーション。
+6.  **逐次GPR:** ウォームアップ後のGPRモデルに獲得関数を適用し、最適な次測定点を逐次選択。
+7.  **逆解析:** 逐次取得データに基づいて地下比抵抗を再構築。
+8.  **基準逆解析:** Wenner配列を用いた基準で同様の逆解析を実施。
+9.  **評価:** 再構築結果と真値を統計・空間指標で比較。
+10. **可視化:** 評価結果をグラフ化し、最終的な比較図を生成。
 
-# 2) 有効化
-conda activate gpr-ert
+------------------------------------------------------------------------
 
-# 3) バージョン確認
-python -V
-pip -V
-```
+## 典型的な出力
+
+-   合成比抵抗マップ
+-   PCA成分および潜在表現
+-   合成測定データセット
+-   逐次GPRログおよびカーネル診断
+-   逆解析結果（GPR vs Wenner）
+-   評価サマリーおよび可視化結果
+
+
+## 主な特徴
+
+- **ウォームアップ → アクティブGPR** の2段階ワークフロー
+**GPRのアクティブフェーズ開始前**に、安定化のための**ウォームアップ期間**を設けます。
+  -   この期間では、**固定された測定構成（通常はWenner-α配列）**を用いてシミュレーションを実施します。
+  -   得られたデータが**ウォームアップデータセット**となり、GPRモデルの初期訓練データになります。
+  -   その後、**逐次GPRフェーズ**が始まり、GPRモデルが候補測定点の不確実性を推定し、**獲得関数**（例：相互情報量 Mutual Information や 期待改善 Expected Improvement）を適用して次にサンプリングすべき構成を選びます。
+  -   新しい測定データを訓練集合に追加し、GPRを再学習して精度を向上させていきます。
+- **特徴量化／メトリック変換:**
+  - **ABMN → `[dAB, dMN, mAB, mMN]`**:
+    ABMN はそれぞれ **電流を印加する電極ペア（A–B）** および **電圧を測定する電極ペア（M–N）** のインデックス番号を表す。これらの番号をユニットボックスへ正規化し、双極子距離（`mAB = |B−A|`, `mMN = |N−M|`）と双極子中心（`dAB = (A+B)/2`, `dMN = (M+N)/2`）を抽出して「距離」と「位置」を明示的に分離。
+  - **設計空間メトリック変換 (`cdf+whiten`)**:
+    累積分布に基づく非線形伸縮（CDFマッピング）＋ホワイトニングでスケール差と共分散を補正し、**等方的で学習しやすい特徴空間**を構築。
+  - **ウォームアップ統計で標準化**:
+    変換後特徴をウォームアップ区間の平均・分散で標準化し、アクティブ段階の候補にも **同一パラメータ** を適用。
+- **分離可能カーネル:**
+  メトリック変換後の4次元特徴空間（`[dAB, dMN, mAB, mMN]` の whiten後軸）に対して、固有値の大きい2軸と小さい2軸のそれぞれに対して、 **独立RBFカーネル** を設定（和・積いずれの結合も可）。ホワイトニングにより軸は混合されているが、**距離／位置の主要軸方向は保持** され、固有値が大きい2軸は `[dAB,dMN]`小さい2軸は `[mAB,mMN]`に対応。そのため分離カーネルが **距離成分**（`dAB`, `dMN`）と **位置成分**（`mAB`, `mMN`）という異なる **物理量を分離して扱う** ことができ、GPRが「電極間距離」と「測定位置」に応じた空間的相関をそれぞれ独立に学習する。 
+- **YAML駆動の設定** により完全再現可能な実験
+- **フィールドごとのログ出力**（CSV/NPZ）でカーネルハイパーパラメータ、獲得統計、逆解析を記録
+- **複数配列型対応:** Wenner, Schlumberger, Dipole–Dipole, Gradient
+- **獲得関数:** UCB, LCB, EI, MAXVAR, Mutual Information
+
+------------------------------------------------------------------------
+
 
 ---
 ## 🧭 プロジェクト構造
@@ -54,12 +85,12 @@ pip -V
     │   ├── fit_pca.py               # PCAを学習し、比抵抗マップを低次元空間に圧縮
     │   ├── cluster_pca.py           # PCA空間でクラスタリングを行い代表サンプルを選択
     │   ├── design.py                # ERT設計空間の列挙（ABMN生成、特徴量作成）
-    │   ├── measurements_warmup.py   # 初期（ウォームアップ）Wenner測定の順計算
+    │   ├── measurements_warmup.py   # 初期（ウォームアップ）Wenner配列による測定の順計算
     │   ├── measurements_post_warmup.py  # 拡張配列型の順計算
     │   ├── gpr_seq_core.py          # ガウス過程回帰（GPR）のコア実装
     │   ├── sequential_GPR.py        # sequential_GPRをラップする逐次設計ドライバ
     │   ├── invert_GPR.py            # GPR選択測定データの一括逆解析
-    │   ├── forward_invert_Wenner.py # Wenner配列基準の順計算＋逆解析ワークフロー
+    │   ├── forward_invert_Wenner.py # Wenner配列を用いた基準の順計算＋逆解析ワークフロー
     │   └── evaluate_GPR_vs_Wenner.py# 評価指標と比較関数
     │
     ├── scripts/                     # buildモジュールを呼び出す簡易CLIスクリプト
@@ -83,7 +114,7 @@ pip -V
     │   ├── measurements_post_warmup.yml # 複数配列型の順計算設定
     │   ├── sequential_GPR.yml       # 逐次GPR設計の設定（カーネル、獲得関数、ウォームアップ長など）
     │   ├── invert_GPR.yml           # 逐次GPR出力の逆解析設定
-    │   ├── forward_invert_Wenner.yml# Wenner配列基準の順計算＋逆解析設定
+    │   ├── forward_invert_Wenner.yml# Wenner配列を用いた基準の順計算＋逆解析設定
     │   └── evaluate_GPR_vs_Wenner.yml # 評価および比較指標設定
     │
     ├── README.md                    # プロジェクト概要とワークフロー
@@ -98,7 +129,6 @@ pip -V
 -   **configs/** ---
     実験パラメータ群を格納。YAMLファイルを変更するだけで再現可能な実験を実行できます。
 
-------------------------------------------------------------------------
 
 ## パイプラインの概要
 
@@ -123,147 +153,111 @@ pip -V
 
   **07**                     `07_invert_GPR.py`                 逐次GPRによる測定データを逆解析し、地下比抵抗分布を再構築。
 
-  **08**                     `08_forward_invert_Wenner.py`      Wenner配列基準の順計算＋逆解析を行い、参照データを作成。
+  **08**                     `08_forward_invert_Wenner.py`      Wenner配列を用いた基準の順計算＋逆解析を行い、参照データを作成。
 
-  **09**                     `09_evaluate_GPR_vs_Wenner.py`     GPRベースとWennerベースの逆解析結果を、誤差・空間的類似度などで定量評価。
+  **09**                     `09_evaluate_GPR_vs_Wenner.py`     GPRベースとWenner配列ベースの逆解析結果を、誤差・空間的類似度などで定量評価。
 
   **10**                     `10_plot_summary.py`               評価指標をまとめ、ボックスプロットや相対改善率などを可視化。
 
-
 ------------------------------------------------------------------------
 
-## ウォームアップフェーズと逐次GPR
 
-**GPRのアクティブフェーズ開始前**に、安定化のための**ウォームアップ期間**を設けます。
+## 🛠️ インストール
 
--   この期間では、**固定された測定構成（通常はWenner-α配列）**を用いてシミュレーションを実施します。\
--   得られたデータが**ウォームアップデータセット**となり、GPRモデルの初期訓練データになります。\
--   その後、**逐次GPRフェーズ**が始まり、GPRモデルが候補測定点の不確実性を推定し、\
-    **獲得関数**（例：相互情報量 Mutual Information や 期待改善 Expected
-    Improvement）を適用して\
-    次にサンプリングすべき構成を選びます。\
--   新しい測定データを訓練集合に追加し、GPRを再学習して精度を向上させていきます。
+このリポジトリには、環境を再現するための `environment.yml` が同梱されています。
 
-この戦略により、**探索（不確実性の低減）**と**活用（高影響領域の重点測定）**を両立させ、\
-ウォームアップからアクティブフェーズへ自然に接続します。
+### クイックスタート（推奨）
+```bash
+# 0) （任意）Mambaforge または Miniconda をインストール
+#    https://conda-forge.org/miniforge/
 
-------------------------------------------------------------------------
+# 1) 公開用の名前で環境を作成（ユーザー固有パスを使用しない）
+mamba env create -n gpr-ert -f environment.yml    # mamba がある場合
+# または
+conda env create -n gpr-ert -f environment.yml
 
-## 概念的な流れ
-
-1.  **合成フィールド生成:**
-    現実的な地質的不均質性を再現する比抵抗フィールドを作成。\
-2.  **次元削減:** PCAにより比抵抗マップを低次元潜在空間へ写像。\
-3.  **サンプル選択:** シミュレーション対象となる代表ケースを選択。\
-4.  **ウォームアップ順計算:** 標準配列構成を用いて初期ERT応答を収集。\
-5.  **候補拡張:** 多数の配列構成に対する応答をシミュレーション。\
-6.  **逐次GPR:**
-    ウォームアップ後のGPRモデルに獲得関数を適用し、最適な次測定点を逐次選択。\
-7.  **逆解析:** 逐次取得データに基づいて地下比抵抗を再構築。\
-8.  **基準逆解析:** Wenner基準で同様の逆解析を実施。\
-9.  **評価:** 再構築結果と真値を統計・空間指標で比較。\
-10. **可視化:** 評価結果をグラフ化し、最終的な比較図を生成。
-
-------------------------------------------------------------------------
-
-## 主な特徴
-
--   **ウォームアップ → アクティブGPR** の2段階ワークフロー\
--   **複数配列型対応:** Wenner, Schlumberger, Dipole--Dipole, Gradient\
--   **獲得関数:** UCB, LCB, EI, MAXVAR, Mutual Information\
--   **分離可能カーネル:**
-    双極子距離と位置に対して独立したRBFを使用し、長さスケールを自動追跡\
--   **YAML駆動の設定** により完全再現可能な実験\
--   **フィールドごとのログ出力**（CSV,
-    NPZ）でカーネルハイパーパラメータ、獲得統計、逆解析を記録
-
-------------------------------------------------------------------------
-
-## 典型的な出力
-
--   合成および逆解析された比抵抗マップ\
--   PCA成分および潜在表現\
--   ウォームアップ／ポストウォームアップ測定データセット\
--   逐次GPRログおよびカーネル診断\
--   逆解析モデル（GPR vs Wenner）\
--   評価サマリーおよび可視化結果
+# 2) 有効化
+conda activate gpr-ert
+を
+# 3) バージョン確認
+python -V
+pip -V
+```
 
 ------------------------------------------------------------------------
 
 ## ⚙️ エンドツーエンド・パイプラインワークフロー
 
-このセクションでは、リポジトリに実装された**完全再現可能なワークフロー**をまとめます。\
-各ステップは順に実行され、対応する`configs/`内のYAMLファイルを使用します。\
-ワークフローは、**合成フィールド生成 →
-逆解析・評価・可視化**までを網羅します。
+このセクションでは、リポジトリに実装された**完全再現可能なワークフロー**をまとめます。
+各ステップは順に実行され、対応する`configs/`内のYAMLファイルを使用します。
+ワークフローは、**合成フィールド生成 → 逆解析・評価・可視化**までを網羅します。
 
 ------------------------------------------------------------------------
 
-1.  **合成比抵抗フィールドの生成**\
+1.  **合成比抵抗フィールドの生成**
     多様な地質条件を表す2次元比抵抗マップを作成。
 
     ``` bash
     python scripts/01_make_fields.py --config configs/make_fields.yml
     ```
 
-2.  **PCAによる潜在空間への射影**\
+2.  **PCAによる潜在空間への射影**
     比抵抗マップを圧縮し、潜在表現を取得。
 
     ``` bash
     python scripts/02_fit_pca.py --config configs/fit_pca.yml
     ```
 
-3.  **潜在表現のクラスタリング**\
+3.  **潜在表現のクラスタリング**
     PCA後の潜在ベクトルをクラスタリングし、代表サンプルを抽出。
 
     ``` bash
     python scripts/03_cluster_pca.py --config configs/cluster_pca.yml
     ```
 
-4.  **ウォームアップ測定シミュレーション（Wenner配列）**\
+4.  **ウォームアップ測定シミュレーション（Wenner配列）**
     pyGIMLiを用いてWenner-α配列で順計算を実施し、GPR初期化用データを収集。
 
     ``` bash
     python scripts/04_measurements_warmup.py --config configs/measurements_warmup.yml
     ```
 
-5.  **拡張測定シミュレーション（複数配列）**\
+5.  **拡張測定シミュレーション（複数配列）**
     Schlumberger, Dipole-Dipole, Gradientなど追加配列で順計算を実施。
 
     ``` bash
     python scripts/05_measurements_post_warmup.py --config configs/measurements_post_warmup.yml
     ```
 
-6.  **逐次ガウス過程回帰（GPR）**\
-    ウォームアップデータで初期学習し、アクティブフェーズで獲得関数を用いて\
-    次に最も情報量の高い測定構成を選択。
+6.  **逐次ガウス過程回帰（GPR）**
+    ウォームアップデータで初期学習し、アクティブフェーズで獲得関数を用いて次に最も情報量の高い測定構成を選択。
 
     ``` bash
     python scripts/06_sequential_GPR.py --config configs/sequential_GPR.yml
     ```
 
-7.  **逐次GPR結果の逆解析**\
+7.  **逐次GPR結果の逆解析**
     選択された測定データを用いて逆解析を実施し、地下比抵抗モデルを再構築。
 
     ``` bash
     python scripts/07_invert_GPR.py --config configs/invert_GPR.yml
     ```
 
-8.  **Wenner基準での順計算＋逆解析**\
+8.  **Wenner配列による順計算＋逆解析**
     Wenner配列を用いた同等の解析を実施し、基準データを作成。
 
     ``` bash
     python scripts/08_forward_invert_Wenner.py --config configs/forward_invert_Wenner.yml
     ```
 
-9.  **GPRとWennerの比較評価**\
+9.  **GPRとWenner配列の比較評価**
     統計指標・空間的類似度に基づいて両者を定量比較。
 
     ``` bash
     python scripts/09_evaluate_GPR_vs_Wenner.py --config configs/evaluate_GPR_vs_Wenner.yml
     ```
 
-10. **サマリープロットとレポートの生成**\
+10. **サマリープロットとレポートの生成**
     評価結果を可視化し、ボックスプロットや相対改善率などをまとめて出力。
 
     ```bash     
@@ -277,8 +271,7 @@ pip -V
 
 ### **01_make_fields.py & make_fields.py — 合成比抵抗マップ生成ステップ**  
 **目的:**  
-複数の地質・環境シナリオ（例: 地層構造、塩水侵入、水位変動など）に基づく**2次元の合成比抵抗マップ（log₁₀ρ）データセット**を生成します。  
-`01_make_fields.py` がYAML設定ファイルを読み込み、指定されたパラメータを `make_fields.py` に渡して、シミュレーション的に多様な地質構造を生成します。  
+複数の地質・環境シナリオ（例: 地層構造、塩水侵入、水位変動など）に基づく**2次元の合成比抵抗マップ（log₁₀ρ）データセット**を生成します。`01_make_fields.py` がYAML設定ファイルを読み込み、指定されたパラメータを `make_fields.py` に渡して、シミュレーション的に多様な地質構造を生成します。  
 
 **処理概要:**  
 1. **YAML読込 (`01_make_fields.py`)**  
@@ -304,10 +297,11 @@ pip -V
   - `meta.json` （格子サイズ・クラス情報・範囲・サンプル数など）  
   - `previews/`（任意、PNGプレビュー画像）
 
+---
+
 ### **02_fit_pca.py & fit_pca.py — 主成分分析（PCA）による次元圧縮ステップ**  
 **目的:**  
-前ステップで生成した比抵抗マップ（log₁₀ρ）データセットに対して、**主成分分析（PCA）**を適用し、空間的特徴を少数の潜在変数に圧縮します。  
-`02_fit_pca.py` は設定ファイル（YAML）を読み込み、内容をコマンドライン引数に変換して `fit_pca.py` を実行します。`fit_pca.py` は実際のPCA処理を行い、学習済み基底・投影結果・再構成プレビューなどを保存します。  
+前ステップで生成した比抵抗マップ（log₁₀ρ）データセットに対して、**主成分分析（PCA）**を適用し、空間的特徴を少数の潜在変数に圧縮します。`02_fit_pca.py` は設定ファイル（YAML）を読み込み、内容をコマンドライン引数に変換して `fit_pca.py` を実行します。`fit_pca.py` は実際のPCA処理を行い、学習済み基底・投影結果・再構成プレビューなどを保存します。  
 
 **処理概要:**  
 1. **YAML読込 (`02_fit_pca.py`)**  
@@ -339,11 +333,11 @@ pip -V
   - `Z.npz` / `Z_per_class.npz` （低次元潜在表現）  
   - `previews_joint_all/` （任意、真値と再構成の比較PNG）  
 
+---
 
 ### **03_cluster_pca.py & cluster_pca.py — PCA潜在空間のクラスタリング＆代表サンプル出力ステップ**  
 **目的:**  
-前ステップで得た潜在ベクトル **Z（PCAの低次元表現）** をクラスタリングして、**代表的なパターンの把握・要約**を行います。  
-`03_cluster_pca.py` は設定（YAML）を読み込み、内容をCLI引数に変換して `cluster_pca.py` を実行します。`cluster_pca.py` は Z のクラスタリング、メタ情報・ラベルの保存、**クラスタ中心の再構成画像（centroids）**や**実サンプル代表（medoids）**の再構成画像出力、**エルボー法のkスイープ**（任意）を行います。  
+前ステップで得た潜在ベクトル **Z（PCAの低次元表現）** をクラスタリングして、**代表的なパターンの把握・要約**を行います。`03_cluster_pca.py` は設定（YAML）を読み込み、内容をCLI引数に変換して `cluster_pca.py` を実行します。`cluster_pca.py` は Z のクラスタリング、メタ情報・ラベルの保存、**クラスタ中心の再構成画像（centroids）**や**実サンプル代表（medoids）**の再構成画像出力、**エルボー法のkスイープ**（任意）を行います。  
 
 **処理概要:**  
 1. **YAML読込・引数転送（`03_cluster_pca.py`）**  
@@ -377,10 +371,11 @@ pip -V
 **注意（推奨）:**  
 - `medoids_index.npz` は後段の **GPR（Gaussian Process Regression）ベースの設計**で参照する想定のため、**出力を有効化することを推奨**します（設定ファイル／フラグで medoids 出力をオンにしてください）。
 
+---
+
 ### **04_measurements_warmup.py & measurements_warmup.py — ERT ウォームアップ順解析（Wenner-α, 固定センサー線）ステップ**
 **目的:**  
-PCAで得た潜在表現 **Z** から浅部の log₁₀ρ を再構成し、深さ方向にパディングしたうえで **pyGIMLi** による **Wenner-α 配列**の順解析を実行し、**設計特徴量（D/Dnorm/ABMN）→ ラベル y=log10(rhoa)** の教師データ束を作成します。  
-`04_measurements_warmup.py` は設定（YAML）を読み込み、内容をCLI引数に変換して `measurements_warmup.py` を実行します。`measurements_warmup.py` が forward シミュレーション本体を担当します。
+PCAで得た潜在表現 **Z** から浅部の log₁₀ρ を再構成し、深さ方向にパディングしたうえで **pyGIMLi** による **Wenner-α 配列**の順解析を実行し、**設計特徴量（D/Dnorm/ABMN）→ ラベル y=log10(rhoa)** の教師データ束を作成します。`04_measurements_warmup.py` は設定（YAML）を読み込み、内容をCLI引数に変換して `measurements_warmup.py` を実行します。`measurements_warmup.py` が forward シミュレーション本体を担当します。
 
 **処理概要:**  
 1. **YAML読込とCLI組み立て（`04_measurements_warmup.py`）**  
@@ -418,10 +413,11 @@ PCAで得た潜在表現 **Z** から浅部の log₁₀ρ を再構成し、深
   - `outputs/ert_surrogate_wenner.npz`（上記一式）  
   - `outputs/field_source_idx.npy`（再現性のためのフィールド索引）  
 
+---
+
 ### **05_measurements_post_warmup.py & measurements_post_warmup.py — ERT順解析（ウォームアップ後／複数配列対応）ステップ**
 **目的:**  
-PCA由来の潜在表現 **Z** をもとに浅部 log₁₀ρ を再構成し、深さ方向へパディングした断面上で **pyGIMLi** により ERT の順解析を大量実行します。  
-`05_measurements_post_warmup.py` は設定（YAML）を読み込み、内容をCLI引数に変換して `measurements_post_warmup.py` を実行します。`measurements_post_warmup.py` が実際の設計列挙と forward 計算・特徴量作成・NPZ出力を担当します。
+PCA由来の潜在表現 **Z** をもとに浅部 log₁₀ρ を再構成し、深さ方向へパディングした断面上で **pyGIMLi** により ERT の順解析を大量実行します。`05_measurements_post_warmup.py` は設定（YAML）を読み込み、内容をCLI引数に変換して `measurements_post_warmup.py` を実行します。`measurements_post_warmup.py` が実際の設計列挙と forward 計算・特徴量作成・NPZ出力を担当します。
 
 **処理概要:**  
 1. **YAML読込→CLI起動（`05_measurements_post_warmup.py`）**  
@@ -462,9 +458,7 @@ PCA由来の潜在表現 **Z** をもとに浅部 log₁₀ρ を再構成し、
 
 ### **06_sequential_GPR.py & sequential_GPR.py — ガウス過程回帰（GPR）による逐次測定設計ステップ**
 **目的:**  
-既存のウォームアップデータを基に、**ガウス過程回帰（GPR）**を用いて ERT（Electrical Resistivity Tomography）の**次に測定すべきABMN**を逐次的に最適化します。  
-`06_sequential_GPR.py` は設定（YAML）を読み込み、各フィールド（Z行）について `sequential_GPR.py` の `run_from_cfg()` を順に実行します。  
-`sequential_GPR.py` は1つのフィールドに対して、**ウォームアップ学習 → アクティブ設計ループ → ログ出力 → 結果の統合**を行います。
+既存のウォームアップデータを基に、**ガウス過程回帰（GPR）**を用いて ERT（Electrical Resistivity Tomography）の**次に測定すべきABMN**を逐次的に最適化します。`06_sequential_GPR.py` は設定（YAML）を読み込み、各フィールド（Z行）について `sequential_GPR.py` の `run_from_cfg()` を順に実行します。`sequential_GPR.py` は1つのフィールドに対して、**ウォームアップ学習 → アクティブ設計ループ → ログ出力 → 結果の統合**を行います。
 
 ---
 
@@ -481,12 +475,9 @@ PCA由来の潜在表現 **Z** をもとに浅部 log₁₀ρ を再構成し、
    - **データ読込:**  
      PCA潜在ベクトル `Z`、対応するウォームアップデータ (`warmup_npz`)、全応答データ (`y_dataset`) を読み込み、対象フィールドの行を抽出。  
    - **設計空間の構築:**  
-     `build.design` 内の **`ERTDesignSpace`** クラスを用いて、  
-     Wenner / Schlumberger / Dipole–Dipole / Gradient 配列の ABMN 組み合わせを列挙し、  
-     相反則を考慮して重複を除去した**正準化された設計空間**を作成。  
+     `build.design` 内の **`ERTDesignSpace`** クラスを用いて、Wenner / Schlumberger / Dipole–Dipole / Gradient 配列の ABMN 組み合わせを列挙し、相反則を考慮して重複を除去した**正準化された設計空間**を作成。
    - **特徴量化:**  
-     各ABMNを `[dAB, dMN, mAB, mMN]` に変換（距離と位置を分離）、  
-     さらに設計空間の**メトリック変換**（例: `cdf+whiten`）を適用して正規化。  
+     各ABMNを `[dAB, dMN, mAB, mMN]` に変換（距離と位置を分離）、さらに設計空間の**メトリック変換**（例: `cdf+whiten`）を適用して正規化。  
    - **ウォームアップ段階:**  
      - 最初の `warmup_steps` サンプルで **GPRモデル**を学習。  
      - カーネルは「距離」と「位置」それぞれに対する **RBFカーネル**の和または積（`kernel_compose`）＋**WhiteKernel** ノイズ項。  
@@ -527,7 +518,7 @@ PCA由来の潜在表現 **Z** をもとに浅部 log₁₀ρ を再構成し、
 
 `sequential_GPR.py` は次のようにインポートします:
 from build.design import ERTDesignSpace
-**build はフォルダー（Pythonパッケージ）**で、その中の `design.py` に `ERTDesignSpace` が定義されています。`ERTDesignSpace` は GPR スクリプトにおける「測定設計空間の生成と幾何処理」を担う中核コンポーネントです。
+**build はフォルダー（Pythonパッケージ）**で、その中の `design.py` に `ERTDesignSpace` が定義されています。`ERTDesignSpace` は GPR スクリプトにおける「測定設計空間の生成と幾何処理」を担うクラスです。
 
 **build/design.py の主な機能:**
 
@@ -548,12 +539,11 @@ from build.design import ERTDesignSpace
 
 以上を踏まえ、`sequential_GPR.py` における設計特徴空間の定義・正規化・探索は、`build/design.py` の `ERTDesignSpace` に依存して動作します。
 
+---
 
 ### **07_invert_GPR.py & invert_GPR.py — 逐次設計ログの一括 ERT 逆解析ステップ（pyGIMLi）**
 **目的:**  
-GPR 逐次設計で得られた **ABMN–応答ログ（seq_log / bundle）** を入力として、pyGIMLi により **地中比抵抗分布（ρ[Ω·m]）をフィールドごとに逆解析**します。  
-`scripts/07_invert_GPR.py` は設定ファイル（YAML）を読み込み、内容をコマンドライン引数に変換して `invert_GPR.py` を実行します。  
-`invert_GPR.py` は **入力バンドルの解析 → メッシュ生成 → 逆解析の実行 → 画像/NPZに集約保存** を担当します。
+GPR 逐次設計で得られた **ABMN–応答ログ（seq_log / bundle）** を入力として、pyGIMLi により **地中比抵抗分布（ρ[Ω·m]）をフィールドごとに逆解析**します。`scripts/07_invert_GPR.py` は設定ファイル（YAML）を読み込み、内容をコマンドライン引数に変換して `invert_GPR.py` を実行します。`invert_GPR.py` は **入力バンドルの解析 → メッシュ生成 → 逆解析の実行 → 画像/NPZに集約保存** を担当します。
 
 **処理概要:**  
 1. **YAML読込（`07_invert_GPR.py`）**  
@@ -588,11 +578,11 @@ GPR 逐次設計で得られた **ABMN–応答ログ（seq_log / bundle）** �
     - メッシュ/座標：`cell_centers`, `L_world`, `Lz`, `world_xmin/xmax/zmin/zmax` ほか  
     - 可視化範囲：`cmin__field####`, `cmax__field####`  
 
+---
+
 ### **08_forward_invert_Wenner.py & forward_invert_Wenner.py — ERT 順解析＋逆解析（Wenner対応）ステップ**
 **目的:**  
-PCA の潜在ベクトル **Z** から **log₁₀ ρ** フィールドを再構成し、pyGIMLi で **ERT の順解析（ρa シミュレーション）**を実行します。さらに、必要に応じて **逆解析（比抵抗分布の推定）**を行い、画像と NPZ バンドルに集約保存します。  
-`08_forward_invert_Wenner.py` は **設定ファイル（YAML）を読み込み → キーを CLI フラグに変換 → 指定スクリプトを起動**するランナーです（既定は `build/forward_invert_Wenner.py`）。:contentReference[oaicite:0]{index=0}  
-`forward_invert_Wenner.py` は **PCA 再構成 → メッシュ生成 → 配列設計（Wenner/ランダム） → 順解析 →（任意）逆解析 → 出力** を担うコア実装です。:contentReference[oaicite:1]{index=1}
+PCA の潜在ベクトル **Z** から **log₁₀ ρ** フィールドを再構成し、pyGIMLi で **ERT の順解析（ρa シミュレーション）**を実行します。さらに、必要に応じて **逆解析（比抵抗分布の推定）**を行い、画像と NPZ バンドルに集約保存します。`08_forward_invert_Wenner.py` は **設定ファイル（YAML）を読み込み → キーを CLI フラグに変換 → 指定スクリプトを起動**するランナーです（既定は `build/forward_invert_Wenner.py`）。`forward_invert_Wenner.py` は **PCA 再構成 → メッシュ生成 → 配列設計（Wenner/ランダム） → 順解析 →（任意）逆解析 → 出力** を担います。
 
 ---
 
@@ -623,7 +613,6 @@ PCA の潜在ベクトル **Z** から **log₁₀ ρ** フィールドを再構
    - **線形／対数カラー**の PNG を保存（既定は先頭フィールド、`--inv-save-all-png` で全フィールド）。  
    - さらに **inversion bundle**（`inv_log/ inv_rho` 各フィールド、`cell_centers`、世界座標、各フィールドの `abmn`/`rhoa` など）を **単一 NPZ** に集約。
 
----
 
 **入出力:**  
 - **入力:**  
@@ -635,16 +624,13 @@ PCA の潜在ベクトル **Z** から **log₁₀ ρ** フィールドを再構
   - **逆解析統合データ**：`inversion_bundle_Wenner.npz`（各フィールドの `inv_rho_cells__field###`, `inv_log_cells__field###` とメタ）。
 
 **補足:**  
-逆解析（pyGIMLiによる比抵抗再構成）は **任意設定** ですが、  
-後続のステップで **GPR の結果（予測比抵抗マップ）との比較・評価** に用いられるため、  
-本ステージでは **`invert: true`（または `--invert`）を有効にすることを推奨**します。  
+逆解析（pyGIMLiによる比抵抗再構成）は **任意設定** ですが、後続のステップで **GPR の結果（予測比抵抗マップ）との比較・評価** に用いられるため、本ステージでは **`invert: true`（または `--invert`）を有効にすることを推奨**します。  
 
 ---
 
-### **09_evaluate_GPR_vs_Wenner.py & evaluate_GPR_vs_Wenner.py — GPR と Wenner 基準の評価ステップ（指標・可視化）**
+### **09_evaluate_GPR_vs_Wenner.py & evaluate_GPR_vs_Wenner.py — GPR と Wenner 配列の評価ステップ（指標・可視化）**
 **目的:**  
-前段で得られた **逆解析（pyGIMLi）結果** と、PCA から再構成した **真値（log₁₀ρ）** を用いて、**GPR 逐次設計**と**Wenner 配列の基準**を多面的に比較・評価します。  
-`scripts/09_evaluate_GPR_vs_Wenner.py` は **設定ファイル（YAML）を受け取り、対象スクリプトを `--config` 付きで起動**するランナーです。:contentReference[oaicite:0]{index=0}  
+前段で得られた **逆解析（pyGIMLi）結果** と、PCA から再構成した **真値（log₁₀ρ）** を用いて、**GPR 逐次設計**と**Wenner 配列を用いた基準ケース**を多面的に比較・評価します。`scripts/09_evaluate_GPR_vs_Wenner.py` は **設定ファイル（YAML）を受け取り、対象スクリプトを `--config` 付きで起動**するランナーです。
 `evaluate_GPR_vs_Wenner.py` は **評価ロジック本体**で、スカラー指標（MAE/RMSE/相関など）と空間指標（フーリエ相関・形態学的 IoU・JSD）を計算し、プロットと集計を出力します。
 
 **処理概要:**  
@@ -689,8 +675,7 @@ PCA の潜在ベクトル **Z** から **log₁₀ ρ** フィールドを再構
 
 ### **10_plot_summary.py — 評価サマリーの可視化・集計ステップ**
 **目的:**  
-`summary_metrics.csv`（各フィールド×各手法の評価指標を集約した表）を読み込み、**サブセット別**（`top25 / all / bottom25 / shallow50 / deep50`）に  
-(1) OTHER vs WENNER の**分布比較**（箱ひげ図）、(2) OTHER 相対改善率の**横棒グラフ**、(3) **IQR（Interquartile Range）/相対IQR**の比較、(4) **生データ/統計/ペア表**の CSV を自動生成します。
+`summary_metrics.csv`（各フィールド×各手法の評価指標を集約した表）を読み込み、**サブセット別**（`top25 / all / bottom25 / shallow50 / deep50`）に (1) OTHER vs WENNER の**分布比較**（箱ひげ図）、(2) OTHER 相対改善率の**横棒グラフ**、(3) **IQR（Interquartile Range）/相対IQR**の比較、(4) **生データ/統計/ペア表**の CSV を自動生成します。
 
 **処理概要:**  
 1. **CSV 読込と前処理**  
@@ -706,7 +691,7 @@ PCA の潜在ベクトル **Z** から **log₁₀ ρ** フィールドを再構
    - `IQR = Q3−Q1` と **Relative IQR(%) = 100×IQR/|median|** を算出し、OTHER vs WENNER を**棒グラフ**で比較。CSV も出力。 
 5. **値のエクスポート**  
    - サブセットごとに以下を保存：  
-     - `values_<subset>.csv`：元行の**生値**  
+     - `values_<subset>.csv`：**元の値**  
      - `values_stats_<subset>.csv`：source×metric の**集計統計**（count/mean/std/min/median/max/Q1/Q3）  
      - `values_paired_<subset>.csv`：**同一 label の WENNER/OTHER/差分**のペア表（平均で重複解消）。
 
@@ -719,3 +704,5 @@ PCA の潜在ベクトル **Z** から **log₁₀ ρ** フィールドを再構
   - CSV：`values_*.csv`, `values_stats_*.csv`, `values_paired_*.csv`, `relative_change_*.csv`, `relative_change_summary_*.csv`, `iqr_*.csv` ほか
 
 ---
+
+
